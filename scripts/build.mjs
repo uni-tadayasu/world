@@ -26,6 +26,18 @@ async function syncPagesRoot(){
 await syncPagesRoot();
 async function walk(dir,prefix='') {for(const file of await readdir(dir,{withFileTypes:true})){if(['server','.openai','.DS_Store'].includes(file.name)||file.name.startsWith('__qa-'))continue;const rel=prefix+'/'+file.name,full=path.join(dir,file.name);if(file.isDirectory())await walk(full,rel);else if(path.extname(file.name)==='.mp3'){media[rel]={url:'https://raw.githubusercontent.com/uni-tadayasu/world/main/dist'+rel};}else{const bytes=await readFile(full);assets[rel]={data:bytes.toString('base64'),type:types[path.extname(file.name)]||'application/octet-stream',etag:'"'+createHash('sha256').update(bytes).digest('hex').slice(0,24)+'"'};}}}
 await walk(dist);
+// A fresh document references a fresh module URL namespace. Relative imports and
+// lazy assets inherit it, so a previous hour-long browser cache cannot keep the
+// old location loader alive after a deployment.
+const revision=createHash('sha256').update(JSON.stringify(Object.entries(assets).map(([name,asset])=>[name,asset.etag]))).digest('hex').slice(0,16);
+const prefix='/_assets/'+revision+'/';
+const html=Buffer.from(assets['/index.html'].data,'base64').toString('utf8')
+  .replace(/((?:src|href)=["'])\.\/([^"']+\.(?:js|css)(?:[?#][^"']*)?)(["'])/g,(_,before,name,after)=>before+prefix+name+after)
+  .replace(/(<script\b[^>]*type=["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi,(_,open,json,close)=>{
+    const map=JSON.parse(json);for(const [name,url] of Object.entries(map.imports||{}))if(typeof url==='string'&&url.startsWith('./'))map.imports[name]=prefix+url.slice(2);return open+JSON.stringify(map)+close;
+  });
+const htmlBytes=Buffer.from(html);
+assets['/index.html']={...assets['/index.html'],data:htmlBytes.toString('base64'),etag:'"'+createHash('sha256').update(htmlBytes).digest('hex').slice(0,24)+'"'};
 const social=(await readFile(path.join(root,'worker/social.js'),'utf8')).replace(/^export\s+(?=(?:async\s+)?function|const|class)/gm,'');
 const world=(await readFile(path.join(root,'worker/world.js'),'utf8')).replace(/^export\s+(?=(?:async\s+)?function|const|class)/gm,'');
 const entry=(await readFile(path.join(root,'worker/index.js'),'utf8')).replace(/^import\s+\{handle(?:Social|World)\}\s+from\s+'\.\/(?:social|world)\.js';\s*/gm,'');
