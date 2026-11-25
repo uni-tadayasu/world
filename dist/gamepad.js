@@ -5,11 +5,12 @@ const DEFAULTS={
   moveXAxis:0,moveYAxis:1,lookXAxis:2,lookYAxis:3,
   invertLookY:false,deadzone:0.18,
   runButton:1,jumpButton:0,interactButton:2,mapButton:3,pauseButton:9,viewButton:8,
+  dpadUpButton:12,dpadDownButton:13,dpadLeftButton:14,dpadRightButton:15,
   gamepadIndex:-1,
 };
 const EDGE_ACTIONS=['jump','interact','map','pause','view'];
 const AXIS_KEYS=['moveXAxis','moveYAxis','lookXAxis','lookYAxis'];
-const BUTTON_KEYS=['runButton','jumpButton','interactButton','mapButton','pauseButton','viewButton'];
+const BUTTON_KEYS=['runButton','jumpButton','interactButton','mapButton','pauseButton','viewButton','dpadUpButton','dpadDownButton','dpadLeftButton','dpadRightButton'];
 const neutral=()=>({moveX:0,moveY:0,lookX:0,lookY:0,run:false,jump:false,interact:false,map:false,pause:false,view:false});
 const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));
 const finite=(value,fallback=0)=>typeof value==='number'&&Number.isFinite(value)?value:fallback;
@@ -19,7 +20,7 @@ const deviceKey=pad=>`${pad.index}:${pad.id||''}`;
 function sanitizeConfig(input,base=DEFAULTS){
   const result={...base};
   if(!input||typeof input!=='object'||Array.isArray(input))return result;
-  for(const key of AXIS_KEYS)if(Number.isInteger(input[key]))result[key]=clamp(input[key],0,31);
+  for(const key of AXIS_KEYS)if(Number.isInteger(input[key]))result[key]=clamp(input[key],-1,31);
   for(const key of BUTTON_KEYS)if(Number.isInteger(input[key]))result[key]=clamp(input[key],-1,63);
   if(Number.isInteger(input.gamepadIndex))result.gamepadIndex=clamp(input.gamepadIndex,-1,15);
   if(typeof input.deadzone==='number'&&Number.isFinite(input.deadzone))result.deadzone=clamp(input.deadzone,0.05,0.5);
@@ -100,6 +101,7 @@ export function createGamepadManager({onConnect=()=>{},onDisconnect=()=>{},onToa
     return pad;
   }
   function axisValue(pad,index){
+    if(index<0)return 0;
     const raw=clamp(finite(pad.axes?.[index]),-1,1);
     const center=calibrations[String(pad.id||'Gamepad')]?.[index]||0;
     const offset=raw-center;
@@ -119,6 +121,12 @@ export function createGamepadManager({onConnect=()=>{},onDisconnect=()=>{},onToa
     const move=stick(pad,config.moveXAxis,config.moveYAxis);
     const look=stick(pad,config.lookXAxis,config.lookYAxis);
     const result={...neutral(),moveX:move.x,moveY:-move.y,lookX:look.x,lookY:look.y*(config.invertLookY?1:-1)};
+    // Some browser-recognized pads expose a D-pad but no analogue sticks. Keep
+    // their directions remappable and normalize diagonals to walking speed.
+    const direction=name=>config[name]>=0&&buttonValue(pad.buttons?.[config[name]])>0.5?1:0;
+    const dpadX=direction('dpadRightButton')-direction('dpadLeftButton');
+    const dpadY=direction('dpadUpButton')-direction('dpadDownButton');
+    if(dpadX||dpadY){const length=Math.hypot(dpadX,dpadY);result.moveX=dpadX/length;result.moveY=dpadY/length;}
     result.run=config.runButton>=0&&buttonValue(pad.buttons?.[config.runButton])>0.5;
     for(const action of EDGE_ACTIONS){
       const index=config[`${action}Button`];
@@ -153,7 +161,7 @@ export function createGamepadManager({onConnect=()=>{},onDisconnect=()=>{},onToa
     const centers=Object.create(null);
     for(const key of AXIS_KEYS){
       const index=config[key];
-      if(index>=pad.axes.length)continue;
+      if(index<0||index>=pad.axes.length)continue;
       const value=finite(pad.axes[index]);
       if(Math.abs(value)>0.35)return {ok:false,message:'スティックを中央に戻し、手を離してからもう一度調整してください。'};
       centers[index]=value;

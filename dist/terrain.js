@@ -1,3 +1,4 @@
+import {getOnlineOrigin} from './site-config.js';
 /**
  * Public Mapzen Terrarium DEM tiles, decoded entirely in the browser.
  * https://registry.opendata.aws/terrain-tiles/
@@ -9,7 +10,7 @@ const DEG = Math.PI / 180;
 const MAX_LATITUDE = 85.05112878;
 const MAX_CACHE_TILES = 8;
 const tileCache = new Map();
-const TERRAIN_ORIGIN = new URL('/api/terrain',typeof location!=='undefined'&&location.hostname.endsWith('.chatgpt.site')?location.origin:'https://machi-life.hisa-0128-1996.chatgpt.site').href;
+const TERRAIN_ORIGIN = new URL('/api/terrain',getOnlineOrigin()).href;
 
 const clamp = (v,lo,hi) => Math.min(hi,Math.max(lo,v));
 const wrap = (v,n) => ((v%n)+n)%n;

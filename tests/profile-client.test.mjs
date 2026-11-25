@@ -4,10 +4,11 @@ import {createProfile,profileAvatarMarkup} from '../dist/profile.js';
 const map=new Map();let denyStorage=false;
 globalThis.localStorage={getItem:key=>map.get(key)??null,setItem(key,value){if(denyStorage)throw new Error('quota');map.set(key,String(value));},removeItem:key=>map.delete(key)};
 globalThis.location={origin:'https://static.example',href:'https://static.example/'};
-const guestKey='machi.profile.guest.v1',cacheKey=id=>'machi.profile.account.'+id+'.v1';
+const guestKey='machi.profile.guest.v1',cacheKey=id=>'machi.profile.device.'+id+'.v1';
 const controllers=[];const create=options=>{const controller=createProfile(options);controllers.push(controller);return controller;};
 const response=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 const pause=()=>new Promise(resolve=>setTimeout(resolve,0));
+const waitFor=async predicate=>{for(let i=0;i<50&&!predicate();i++)await pause();assert.ok(predicate(),'asynchronous request must start');};
 try{
   localStorage.setItem('machi.life.v1',JSON.stringify({name:'以前の名前'}));
   const guest=create();assert.equal(guest.getState().name,'以前の名前');assert.equal(guest.getState().scope,'guest');
@@ -19,7 +20,7 @@ try{
   assert.equal(guest.getState().name,'端末の住人');assert.equal(localStorage.getItem(guestKey),durableGuest);
   const anotherTab=create();assert((await guest.save({name:'別タブの更新'})).ok);
   const conflict=await anotherTab.save({name:'古い画面の更新'});assert.equal(conflict.code,'profile_conflict');assert.equal(anotherTab.getState().name,'別タブの更新');
-  const guestSnapshot=localStorage.getItem(guestKey);
+  const guestSnapshot=localStorage.getItem(guestKey);const legacyAccountKey='machi.profile.account.A.v1',legacyAccount=JSON.stringify({format:1,accountId:'A',profile:{name:'以前の保存'},pending:null});localStorage.setItem(legacyAccountKey,legacyAccount);
   guest.dispose();anotherTab.dispose();
   localStorage.setItem(guestKey,'corrupted original');const corrupt=create();await corrupt.sync();assert.equal(localStorage.getItem(guestKey),'corrupted original');assert(corrupt.getState().error);corrupt.dispose();localStorage.setItem(guestKey,guestSnapshot);
 
@@ -28,7 +29,7 @@ try{
   const accounts={A:defaultProfile('A'),B:{...defaultProfile('B'),name:'別のアカウント'}};let session='A',posts=[];
   globalThis.fetch=async(url,options={})=>{
     assert.equal(options.credentials,'same-origin');assert(url.startsWith('/api/social/'));
-    if(url==='/api/social/me')return response(session?{signedIn:true,user:accounts[session]}:{signedIn:false});
+    if(url==='/api/social/me')return response(session?{connected:true,identityKind:'device',signedIn:true,user:accounts[session]}:{signedIn:false});
     if(url==='/api/social/profile'&&options.method==='POST'){
       const data=JSON.parse(options.body);posts.push({session,data});
       if(!session)return response({code:'auth_required',error:'ログインしてください。'},401);
@@ -44,10 +45,10 @@ try{
   const panel={querySelector(){return shell;}};
   const changes=[];const account=create({openPanel:()=>panel,onChange:state=>changes.push(state)});
   assert.equal(account.getState().name,'別タブの更新');assert.equal(account.getState().verified,false);
-  assert.equal((await account.sync()).syncing,false);assert.equal(account.getState().scope,'account');assert.equal(account.getState().name,'旅人');assert.equal(account.getState().verified,true);assert.equal(posts.length,0,'guest values must never auto-publish');
+  assert.equal((await account.sync()).syncing,false);assert.equal(account.getState().scope,'device');assert.equal(account.getState().name,'旅人');assert.equal(account.getState().verified,true);assert.equal(posts.length,0,'guest values must never auto-publish');
   assert((await account.save({name:'<b>青</b>',tagline:'<script>alert(1)</script>',avatarIcon:'coffee',accent:'#445566'})).ok);
   assert.equal(posts[0].data.expectedUserId,'A');assert.equal(posts[0].data.expectedVersion,0);
-  account.open();await account.sync();assert(shell.innerHTML.includes('&lt;b&gt;青&lt;/b&gt;'));assert(!shell.innerHTML.includes('<script>alert(1)</script>'));
+  account.open();await account.sync();assert(shell.innerHTML.includes('&lt;b&gt;青&lt;/b&gt;'));assert(!/ログイン|アカウント|signin-with/.test(shell.innerHTML),'profile has no login controls');assert(shell.innerHTML.includes('ブラウザのデータを消去'));assert(!shell.innerHTML.includes('<script>alert(1)</script>'));
   const avatar=profileAvatarMarkup({accent:'red;position:fixed',avatarIcon:'" onload="alert(1)'},40);assert(!avatar.includes('position:fixed'));assert(!avatar.includes('onload'));assert(avatar.includes('#2e6b54'));
   assert.equal(localStorage.getItem(guestKey),guestSnapshot);
   const aSaved={...accounts.A};session='B';
@@ -61,18 +62,19 @@ try{
   const stale=await account.save({name:'古い編集の続き'});assert.equal(stale.code,'profile_conflict');assert.equal(account.getState().name,'別の画面から更新');assert.equal(account.getState().pending,true);
   account.open({edit:true});await account.sync();assert(shell.innerHTML.includes('最新の内容を読み込む'),'stale drafts need an explicit reload action');
   assert((await account.save({name:'確認して保存'})).ok);assert.equal(account.getState().pending,false);
-  session=null;await account.sync();assert.equal(account.getState().scope,'guest');assert.equal(account.getState().name,'別タブの更新');assert.equal(localStorage.getItem(guestKey),guestSnapshot);
+  session=null;await account.sync();assert.equal(account.getState().scope,'device');assert.equal(account.getState().name,'確認して保存');assert.ok(account.getState().error,'failed reconnection retains this browser identity');assert.equal(localStorage.getItem(guestKey),guestSnapshot);
   account.dispose();
 
   // A response after disposal must never become an account state or write its cache.
   let release;fetch=()=>new Promise(resolve=>{release=resolve;});const observed=[];
-  const late=create({onChange:state=>observed.push(state)});const inFlight=late.sync();await Promise.resolve();late.dispose();const before=observed.length;
-  release(response({signedIn:true,user:{...defaultProfile('C'),name:'遅れた応答'}}));await inFlight;
+  const late=create({onChange:state=>observed.push(state)});const inFlight=late.sync();await waitFor(()=>typeof release==='function');late.dispose();const before=observed.length;
+  release(response({connected:true,identityKind:'device',signedIn:true,user:{...defaultProfile('C'),name:'遅れた応答'}}));await inFlight;
   assert.equal(late.getState().scope,'guest');assert.equal(observed.length,before);assert.equal(localStorage.getItem(cacheKey('C')),null);
 
   // Switching identity during an awaited /me response must cancel a captured guest save.
-  const gate=create();const syncing=gate.sync();const saving=gate.save({name:'ゲストの編集中の名前'});release(response({signedIn:true,user:accounts.B}));await syncing;
+  release=null;const gate=create();const syncing=gate.sync();const saving=gate.save({name:'ゲストの編集中の名前'});await waitFor(()=>typeof release==='function');release(response({connected:true,identityKind:'device',signedIn:true,user:accounts.B}));await syncing;
   assert.equal((await saving).code,'profile_identity_changed');assert.equal(gate.getState().id,'B');assert.equal(localStorage.getItem(guestKey),guestSnapshot);gate.dispose();
-  const cancelled=create();const check=cancelled.sync(),write=cancelled.save({name:'閉じた後の編集'});cancelled.dispose();release(response({signedIn:false}));await check;assert.equal((await write).ok,false);assert.equal(localStorage.getItem(guestKey),guestSnapshot);
-  console.log('PASS: guest durability and migration; storage failure and cross-tab conflict; guest/account separation; guarded account switching; pending edits; concurrency conflicts; escaped cards; safe icon colors; late-response disposal.');
+  release=null;const cancelled=create();const check=cancelled.sync(),write=cancelled.save({name:'閉じた後の編集'});await waitFor(()=>typeof release==='function');cancelled.dispose();release(response({signedIn:false}));await check;assert.equal((await write).ok,false);assert.equal(localStorage.getItem(guestKey),guestSnapshot);
+  assert.equal(localStorage.getItem(legacyAccountKey),legacyAccount,'legacy account cache stays untouched');
+  console.log('PASS: browser-local durability and migration; storage failure and cross-tab conflict; local/device separation; guarded browser identity changes; pending edits; concurrency conflicts; escaped cards; safe icon colors; late-response disposal.');
 }finally{for(const controller of controllers)controller.dispose();}

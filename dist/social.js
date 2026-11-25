@@ -1,12 +1,14 @@
-/** Authenticated community UI and opt-in, four-participant WebRTC voice. */
+/** Browser-owned community UI and opt-in, four-participant WebRTC voice. */
 import {createProfile,profileAvatarMarkup} from './profile.js';
-export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profileController=null,baseUrl='https://machi-life.hisa-0128-1996.chatgpt.site'}={}) {
+import {readDeviceSession} from './device-session.js';
+import {getOnlineOrigin,isOnlineHost} from './site-config.js';
+export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profileController=null,baseUrl=getOnlineOrigin()}={}) {
   const esc=escapeHTML||(value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])));
   const paths={chat:'M21 11.5a8.4 8.4 0 0 1-1 4L21 21l-5.5-1a8.4 8.4 0 0 1-4 1A9 9 0 1 1 21 11.5Z',users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',mic:'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8',micoff:'M9 5a3 3 0 0 1 6 0v7M9 9v3a3 3 0 0 0 5 2.2M5 10v2a7 7 0 0 0 12 4.9M19 10v2c0 .5 0 1-.2 1.5M12 19v3M8 22h8M2 2l20 20',phone:'M5 15c4-5 10-5 14 0M3 14l2-2 4 2-1 4-5-1ZM21 14l-2-2-4 2 1 4 5-1Z',building:'M4 21V5h10v16M14 10h6v11M8 9h2M8 13h2M8 17h2M17 14h1M17 18h1M2 21h20',edit:'M16 3l5 5M4 20l4-1L21 6a2 2 0 0 0-3-3L5 16l-1 4Z',copy:'M9 9h12v12H9ZM5 15H3V3h12v2',sound:'M11 5L6 9H2v6h4l5 4V5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14'};
   const ico=name=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.users}"/></svg>`;
   const cssUrl=new URL('./social.css',import.meta.url).href;
   if(!document.querySelector(`link[data-machi-social]`)){const link=document.createElement('link');link.rel='stylesheet';link.href=cssUrl;link.dataset.machiSocial='';document.head.append(link);}
-  const onlineUrl=new URL(baseUrl,location.href);const hosted=location.origin===onlineUrl.origin;
+  const onlineUrl=new URL(baseUrl,location.href);const hosted=isOnlineHost();
   const apiBase='/api/social';
   let shell=null,body=null,visible=false,generation=0,chatTimer=null,pollBusy=false,pollTick=0;
   let authenticated=null,user=null,state={friends:{incoming:[],outgoing:[],accepted:[]},organizations:[],blocks:[]};
@@ -16,7 +18,7 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
   let searchQuery='',searchResults=null,orgs=[],orgDetail=null,orgMembers=[],createOrg=false,leaveConfirm=false;
   let menuMessage=null,reportMessage=null,reportReason='',loadingChannel=false;
   const drafts=new Map();
-  const voice={joined:false,joining:false,channel:'global',selected:'global',name:'街の広場',stream:null,muted:false,peers:new Map(),members:[],cursor:0,timer:null,polling:false,epoch:0,error:'',audioBlocked:false};
+  const voice={joined:false,joining:false,ownerId:null,channel:'global',selected:'global',name:'街の広場',stream:null,muted:false,peers:new Map(),members:[],cursor:0,timer:null,polling:false,epoch:0,error:'',audioBlocked:false};
   const audioContainer=document.createElement('div');audioContainer.hidden=true;audioContainer.dataset.machiVoiceAudio='';document.body.append(audioContainer);
   const dock=document.createElement('div');dock.className='machi-voice-dock';dock.hidden=true;dock.setAttribute('aria-label','参加中の音声通話');document.body.append(dock);
   let turn={url:'',username:'',credential:''};
@@ -31,13 +33,16 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
   const isVisible=()=>visible&&shell?.isConnected&&shell.getClientRects().length>0;
   function errorText(err){return err?.message||'接続できませんでした。少し待って、もう一度お試しください。';}
   function showError(err){error=errorText(err);if(isVisible())render();else toast(error);}
-  async function api(path,{method='GET',data,keepalive=false}={}){
+  async function api(path,{method='GET',data,keepalive=false,expectedUserId=user?.id}={}){
+    if(path==='/me'&&method==='GET')return readDeviceSession();
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);let response;
-    try{response=await fetch(`${apiBase}${path}`,{method,credentials:'same-origin',headers:data===undefined?{Accept:'application/json'}:{Accept:'application/json','Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data),keepalive,cache:'no-store',signal:controller.signal});}
+    const requestHeaders={Accept:'application/json',...(expectedUserId?{'X-Machi-User-Id':expectedUserId}:{})};
+    if(method!=='GET')requestHeaders['Content-Type']='application/json';
+    try{response=await fetch(`${apiBase}${path}`,{method,credentials:'same-origin',headers:requestHeaders,body:method==='GET'?undefined:JSON.stringify({...data,expectedUserId}),keepalive,cache:'no-store',signal:controller.signal});}
     catch(err){if(err.name==='AbortError')throw new Error('オンライン機能の応答に時間がかかっています。もう一度お試しください。');throw err;}
     finally{clearTimeout(timer);}
     let result;try{result=await response.json();}catch{throw new Error('オンライン機能の応答を読み取れませんでした。ページを再読み込みしてください。');}
-    if(!response.ok){if(response.status===401){authenticated=false;user=null;void leaveVoice(false);if(isVisible())render();}const err=new Error(typeof result.error==='string'?result.error:'操作を完了できませんでした。');err.code=result.code;err.status=response.status;throw err;}
+    if(!response.ok){if(response.status===401||result.code==='session_identity_changed'){authenticated=false;user=null;generation++;void leaveVoice(false,false,false);if(isVisible())render();}const err=new Error(typeof result.error==='string'?result.error:'操作を完了できませんでした。');err.code=result.code;err.status=response.status;throw err;}
     return result;
   }
   function formatTime(value){const time=typeof value==='number'&&value<1e11?value*1000:value;const d=new Date(time);return Number.isNaN(d.getTime())?'':d.toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});}
@@ -55,12 +60,12 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
     const focus=preserveForm();const oldScroll=shell.querySelector('.social-messages')?.scrollTop;
     const fields=preserveInputs?[...shell.querySelectorAll('form[data-form] input,form[data-form] textarea')].map(el=>({form:el.form.dataset.form,name:el.name,value:el.value})):[];
     const details=[...shell.querySelectorAll('details')].map(el=>el.open);
-    if(!hosted){shell.innerHTML=`<div class="social-auth"><span class="social-hero-icon">${ico('users')}</span><h3>街の人と、つながる。</h3><p>チャット・フレンド・コミュニティ・音声通話は、アカウントを確認できるオンライン版で利用できます。</p><a class="social-btn primary" href="${esc(onlineUrl.href)}" target="_top">オンライン版で接続</a><p class="social-note">この画面から、オンライン版の同じゲームへ移動します。</p></div>`;return;}
-    if(authenticated===null){shell.innerHTML=error?`<div class="social-auth"><h3>接続を確認できませんでした。</h3><p>${esc(error)}</p>${btn('もう一度接続','retry-connect','','primary')}</div>`:`<div class="social-loading" role="status">アカウントを確認しています…</div>`;return;}
-    if(!authenticated){shell.innerHTML=`<div class="social-auth"><span class="social-hero-icon">${ico('users')}</span><h3>あなたの名前で、<br>街の会話に参加しよう。</h3><p>ChatGPTアカウントでログインすると、チャットやフレンド登録、コミュニティ、最大4人の音声通話を利用できます。</p><a class="social-btn primary" href="/signin-with-chatgpt?return_to=/" target="_top">ChatGPTでログイン</a><p class="social-note">会話にはゲーム内の表示名とフレンドコードを使います。メールアドレスは表示されません。</p></div>${error?`<div class="social-error" role="alert">${esc(error)}</div>`:''}`;return;}
+    if(!hosted){shell.innerHTML=`<div class="social-auth"><span class="social-hero-icon">${ico('users')}</span><h3>街の人と、つながる。</h3><p>チャット・フレンド・コミュニティ・音声通話は、オンライン版を開くと利用できます。</p><a class="social-btn primary" href="${esc(onlineUrl.href)}" target="_top">オンライン版で接続</a><p class="social-note">この画面から、オンライン版の同じゲームへ移動します。</p></div>`;return;}
+    if(authenticated===null){shell.innerHTML=error?`<div class="social-auth"><h3>接続を確認できませんでした。</h3><p>${esc(error)}</p>${btn('もう一度接続','retry-connect','','primary')}</div>`:`<div class="social-loading" role="status">街のつながりを準備しています…</div>`;return;}
+    if(!authenticated){shell.innerHTML=`<div class="social-auth"><span class="social-hero-icon">${ico('users')}</span><h3>もう一度、街につながる。</h3><p>このブラウザの接続を確認すると、チャット・フレンド・コミュニティ・通話を利用できます。</p>${btn('もう一度接続','retry-connect','','primary')}${error?`<p class="social-error" role="alert">${esc(error)}</p>`:''}</div>`;return;}
     const incoming=state.friends?.incoming?.length||0;
     shell.innerHTML=`<div class="social-profile">${avatar(user)}<div class="social-profile-info"><strong>${profileName(user,'profile')}</strong><span class="social-code">ID ${esc(user.code)}</span></div><div class="social-profile-actions">${btn(ico('copy'),'copy-code','aria-label="フレンドコードをコピー"')}${btn(ico('edit'),'edit-profile','aria-label="プロフィールを編集"')}</div></div>
-      <nav class="social-tabs" aria-label="つながりのメニュー">${[['chat','チャット'],['friends','フレンド'],['orgs','コミュニティ'],['voice','通話']].map(([key,label])=>`<button type="button" class="social-tab ${tab===key?'active':''}" data-action="tab" data-tab="${key}" aria-current="${tab===key?'page':'false'}">${label}${key==='friends'&&incoming?`<span class="social-badge">${incoming}</span>`:''}</button>`).join('')}</nav>
+      <p class="social-note">名前はプロフィールから変更できます。このブラウザのデータを消すと、今のフレンドコードや保存先には戻れなくなります。</p><nav class="social-tabs" aria-label="つながりのメニュー">${[['chat','チャット'],['friends','フレンド'],['orgs','コミュニティ'],['voice','通話']].map(([key,label])=>`<button type="button" class="social-tab ${tab===key?'active':''}" data-action="tab" data-tab="${key}" aria-current="${tab===key?'page':'false'}">${label}${key==='friends'&&incoming?`<span class="social-badge">${incoming}</span>`:''}</button>`).join('')}</nav>
       ${error?`<div class="social-error" role="alert">${esc(error)} ${btn('閉じる','clear-error','','quiet')}</div>`:''}
       <div class="social-content">${tab==='chat'?chatHTML():tab==='friends'?friendsHTML():tab==='orgs'?orgHTML():voiceHTML()}</div>`;
     if(tab==='chat'){renderMessages(false);const list=shell.querySelector('.social-messages');if(oldScroll!==undefined&&list)list.scrollTop=oldScroll;}
@@ -140,7 +145,16 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
   }
   async function connect(){
     const token=++generation;error='';authenticated=null;render();
-    try{const me=await api('/me');if(token!==generation)return;authenticated=!!me.signedIn;user=me.user||null;if(authenticated){await refreshState();if(token!==generation)return;render();if(tab==='chat')await loadMessages(true);else if(tab==='orgs')await loadOrgs();startPolling();}else render();}
+    try{
+      const me=await api('/me');if(token!==generation)return;
+      const nextUser=me.connected&&me.identityKind==='device'?me.user:null;
+      if((user?.id||null)!==(nextUser?.id||null)){
+        void leaveVoice(false,false,false);messages=[];since=0;channel='global';drafts.clear();searchResults=null;orgs=[];orgDetail=null;orgMembers=[];menuMessage=null;reportMessage=null;loadingChannel=false;
+        state={user:nextUser,friends:{incoming:[],outgoing:[],accepted:[]},organizations:[],blocks:[]};
+      }
+      authenticated=!!nextUser;user=nextUser;
+      if(authenticated){await refreshState();if(token!==generation)return;render();if(tab==='chat')await loadMessages(true);else if(tab==='orgs')await loadOrgs();startPolling();}else render();
+    }
     catch(err){if(token!==generation)return;authenticated=err.status===401?false:null;error=errorText(err);render();}
   }
   function open(){
@@ -210,7 +224,17 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
       else if(action==='close-msg-menu'){menuMessage=null;render();}
       else if(action==='start-report'){reportMessage=menuMessage;menuMessage=null;reportReason='';render();}
       else if(action==='cancel-report'){reportMessage=null;reportReason='';render();}
-      else if(action==='block-user'){const id=button.dataset.user;await api('/block',{method:'POST',data:{userId:id}});removePeer(id);menuMessage=null;if(channel===`dm:${id}`)channel='global';await refreshState();messages=messages.filter(m=>m.user.id!==id);render();toast('このユーザーをブロックしました。');}
+      else if(action==='block-user'){
+        const id=button.dataset.user;await api('/block',{method:'POST',data:{userId:id}});removePeer(id);
+        const leavingDM=channel===`dm:${id}`;menuMessage=null;reportMessage=null;reportReason='';
+        // Clear private history and its cursor before the next awaited request.
+        // Otherwise an account refresh failure leaves a DM displayed under the
+        // public composer, and a high DM cursor skips earlier public messages.
+        if(leavingDM){channel='global';messages=[];since=0;loadingChannel=true;render();}
+        await refreshState();messages=messages.filter(m=>m.user.id!==id);render();
+        if(leavingDM)await loadMessages(true);
+        toast(leavingDM?'このユーザーをブロックし、街の広場へ戻りました。':'このユーザーをブロックしました。');
+      }
       else if(action==='unblock-user'){await api('/block',{method:'DELETE',data:{userId:button.dataset.user}});await refreshState({redraw:true});}
       else if(action==='voice-channel'){voice.selected=channel;tab='voice';render();}
       else if(action==='voice-join')await joinVoice();
@@ -231,7 +255,7 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
     if(isVisible()&&tab==='voice')render(true);
   }
   function removePeer(id){const entry=voice.peers.get(id);if(!entry)return;entry.pc.onicecandidate=null;entry.pc.onconnectionstatechange=null;entry.pc.ontrack=null;entry.pc.close();entry.audio.srcObject=null;entry.audio.remove();voice.peers.delete(id);}
-  async function sendSignal(to,type,data){if(!voice.joined)return;await api('/voice/signal',{method:'POST',data:{channel:voice.channel,to,type,data}});}
+  async function sendSignal(to,type,data){if(!voice.joined)return;await api('/voice/signal',{method:'POST',data:{channel:voice.channel,to,type,data},expectedUserId:voice.ownerId});}
   async function ensurePeer(info,offer=true){
     if(info.id===user?.id)return null;if(voice.peers.has(info.id))return voice.peers.get(info.id);
     if(!voice.stream||!voice.joined)return null;
@@ -266,7 +290,7 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
   async function pollVoice(){
     if(!voice.joined||voice.polling)return;voice.polling=true;const epoch=voice.epoch;
     try{
-      const result=await api(`/voice/poll?channel=${encodeURIComponent(voice.channel)}&since=${voice.cursor}`);if(!voice.joined||voice.epoch!==epoch)return;
+      const result=await api(`/voice/poll?channel=${encodeURIComponent(voice.channel)}&since=${voice.cursor}`,{expectedUserId:voice.ownerId});if(!voice.joined||voice.epoch!==epoch)return;
       voice.members=result.peers||[];const ids=new Set(voice.members.map(p=>p.id));for(const id of voice.peers.keys())if(!ids.has(id))removePeer(id);
       for(const peer of voice.members)if(peer.id!==user?.id)await ensurePeer(peer);
       for(const signal of result.signals||[]){try{await handleSignal(signal);}catch(err){voice.error=`音声の接続を完了できませんでした。${errorText(err)}`;}voice.cursor=Math.max(voice.cursor,Number(signal.id)||0);}
@@ -277,24 +301,24 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
   async function joinVoice(){
     if(voice.joined||voice.joining)return;
     if(!navigator.mediaDevices?.getUserMedia||!window.RTCPeerConnection)throw new Error('このブラウザは音声通話に対応していません。');
-    voice.joining=true;voice.error='';voice.audioBlocked=false;const joinEpoch=++voice.epoch;updateVoiceUI();let stream,serverJoined=false;const requested=voice.selected;
+    voice.joining=true;voice.error='';voice.audioBlocked=false;const joinEpoch=++voice.epoch;updateVoiceUI();let stream,serverJoined=false;const requested=voice.selected,ownerId=user?.id;
     try{
       stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
-      if(voice.epoch!==joinEpoch){stream.getTracks().forEach(t=>t.stop());return;}
-      const result=await api('/voice/join',{method:'POST',data:{channel:requested}});serverJoined=true;
-      if(voice.epoch!==joinEpoch){stream.getTracks().forEach(t=>t.stop());await api('/voice/leave',{method:'POST',data:{channel:requested}}).catch(()=>{});return;}
-      voice.joined=true;voice.channel=requested;voice.name=nameOfChannel(requested);voice.members=result.peers||[];voice.cursor=Number(result.lastSignalId)||0;voice.stream=stream;voice.muted=false;voice.polling=false;
+      if(voice.epoch!==joinEpoch||user?.id!==ownerId){stream.getTracks().forEach(t=>t.stop());return;}
+      const result=await api('/voice/join',{method:'POST',data:{channel:requested},expectedUserId:ownerId});serverJoined=true;
+      if(voice.epoch!==joinEpoch){stream.getTracks().forEach(t=>t.stop());await api('/voice/leave',{method:'POST',data:{channel:requested},expectedUserId:ownerId}).catch(()=>{});return;}
+      voice.joined=true;voice.ownerId=ownerId;voice.channel=requested;voice.name=nameOfChannel(requested);voice.members=result.peers||[];voice.cursor=Number(result.lastSignalId)||0;voice.stream=stream;voice.muted=false;voice.polling=false;
       for(const track of stream.getAudioTracks())track.onended=()=>{if(voice.joined){void leaveVoice();toast('マイクが停止したため通話から退出しました。');}};
       for(const peer of voice.members)if(peer.id!==user?.id)await ensurePeer(peer);
       voice.timer=setInterval(()=>void pollVoice(),2000);void pollVoice();
-    }catch(err){stream?.getTracks().forEach(t=>t.stop());if(serverJoined)await api('/voice/leave',{method:'POST',data:{channel:requested}}).catch(()=>{});for(const id of [...voice.peers.keys()])removePeer(id);voice.joined=false;voice.stream=null;
+    }catch(err){stream?.getTracks().forEach(t=>t.stop());if(serverJoined)await api('/voice/leave',{method:'POST',data:{channel:requested},expectedUserId:ownerId}).catch(()=>{});for(const id of [...voice.peers.keys()])removePeer(id);voice.joined=false;voice.ownerId=null;voice.stream=null;
       if(err.name==='NotAllowedError')throw new Error('マイクの使用が許可されませんでした。ブラウザのマイク設定を確認してから、参加を押してください。');if(err.name==='NotFoundError')throw new Error('使用できるマイクが見つかりませんでした。');throw err;
     }finally{if(voice.epoch===joinEpoch)voice.joining=false;updateVoiceUI();}
   }
-  async function leaveVoice(notify=true,keepalive=false){
-    const wasJoined=voice.joined,oldChannel=voice.channel;voice.epoch++;voice.joined=false;voice.joining=false;voice.polling=false;clearInterval(voice.timer);voice.timer=null;
+  async function leaveVoice(notify=true,keepalive=false,informServer=true){
+    const wasJoined=voice.joined,oldChannel=voice.channel,oldOwner=voice.ownerId;voice.ownerId=null;voice.epoch++;voice.joined=false;voice.joining=false;voice.polling=false;clearInterval(voice.timer);voice.timer=null;
     voice.stream?.getTracks().forEach(track=>{track.onended=null;track.stop();});voice.stream=null;for(const id of [...voice.peers.keys()])removePeer(id);voice.members=[];voice.cursor=0;voice.audioBlocked=false;voice.error='';updateVoiceUI();
-    if(wasJoined&&hosted)try{await api('/voice/leave',{method:'POST',data:{channel:oldChannel},keepalive});}catch(err){if(notify)toast(`音声は停止しました。退出通知を送れませんでした: ${errorText(err)}`);}
+    if(wasJoined&&hosted&&informServer)try{await api('/voice/leave',{method:'POST',data:{channel:oldChannel},keepalive,expectedUserId:oldOwner});}catch(err){if(notify)toast(`音声は停止しました。退出通知を送れませんでした: ${errorText(err)}`);}
   }
   function toggleMute(){if(!voice.stream)return;voice.muted=!voice.muted;for(const t of voice.stream.getAudioTracks())t.enabled=!voice.muted;updateVoiceUI();}
   async function resumeAudio(){let blocked=false;for(const {audio} of voice.peers.values())try{await audio.play();}catch{blocked=true;}voice.audioBlocked=blocked;updateVoiceUI();}
@@ -304,7 +328,7 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profi
     if((user?.id||null)!==nextId){
       generation++;authenticated=!!nextId;user=nextId?{...next}:null;state={user,friends:{incoming:[],outgoing:[],accepted:[]},organizations:[],blocks:[]};
       messages=[];since=0;channel='global';drafts.clear();searchResults=null;orgs=[];orgDetail=null;orgMembers=[];menuMessage=null;reportMessage=null;loadingChannel=false;
-      void leaveVoice(false);if(isVisible()){render();if(nextId)void connect();}return;
+      void leaveVoice(false,false,false);if(isVisible()){render();if(nextId)void connect();}return;
     }
     if(nextId&&Number(next.version)>=Number(user?.version||0)){
       user={...user,...next};state.user=user;messages=messages.map(message=>message.user.id===nextId?{...message,user:{...message.user,name:next.name,title:next.title,accent:next.accent,avatarIcon:next.avatarIcon}}:message);

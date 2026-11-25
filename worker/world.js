@@ -1,8 +1,8 @@
-const WORLD_ALLOWED_ORIGINS=new Set(['https://machi-life.hisa-0128-1996.chatgpt.site','https://uni-tadayasu.github.io']);
+const WORLD_ALLOWED_ORIGINS=new Set(['https://www.omoji-z.com','https://machi-life.hisa-0128-1996.chatgpt.site','https://uni-tadayasu.github.io']);
 const WORLD_REQUESTS=new Map(),WORLD_MEMORY=new Map();
 const WORLD_MEMORY_LIMIT=16*1024*1024,WORLD_MEMORY_ENTRY_LIMIT=8*1024*1024;
 let worldMemoryBytes=0;
-const WORLD_AGENT='MACHI-LIFE/3.0 (https://machi-life.hisa-0128-1996.chatgpt.site/about.html)';
+const WORLD_AGENT='MACHI-LIFE/4.0 (https://www.omoji-z.com/about.html)';
 function worldForget(key){const cached=WORLD_MEMORY.get(key);if(!cached)return;worldMemoryBytes-=cached.bytes;WORLD_MEMORY.delete(key);}
 function worldRemember(key,result,expiry){
   const bytes=new TextEncoder().encode(result.text).byteLength;

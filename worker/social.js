@@ -1,8 +1,11 @@
-// Authenticated community, messaging and opt-in WebRTC signalling for MACHI LIFE.
-// The hosting gateway supplies identity. Client-submitted account IDs are ignored.
+// Browser-owned community, messaging and opt-in WebRTC signalling for MACHI LIFE.
+// An opaque HttpOnly session cookie supplies identity; account headers and client IDs do not.
 const PREFIX='/api/social';
 const VOICE_TTL=45000;
 const SIGNAL_TTL=120000;
+const DEVICE_COOKIE='__Host-machi-device';
+const DEVICE_TTL=180*86400000;
+const DEVICE_RENEW=30*86400000;
 const PUBLIC_FIELDS='id,code,name,tagline,bio,title,accent,avatar_icon,show_name,profile_version,updated_at';
 const PROFILE_TITLES=new Set(['','街の住人','気ままな旅人','散歩好き','カフェ日和','本のある暮らし','部屋づくり好き','のんびり暮らし','街の探索者']);
 const PROFILE_ICONS=new Set(['leaf','coffee','book','home','sun','moon','star','compass']);
@@ -24,6 +27,7 @@ const pair=(a,b)=>a<b?[a,b]:[b,a];
 const changed=result=>Number(result?.meta?.changes||0)>0;
 const blockedSQL='NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?))';
 const blockedParams=(a,b)=>[a,b,b,a];
+const requestBodies=new WeakMap();
 
 function string(value,label,min,max){
   if(typeof value!=='string')fail(400,`${label}を入力してください。`);
@@ -42,6 +46,8 @@ function numericId(value){
   return number;
 }
 async function body(request,maxBytes=16384){
+  const cached=requestBodies.get(request);
+  if(cached){if(cached.bytes>maxBytes)fail(413,'送信するデータが大きすぎます。');return cached.value;}
   if(!/^application\/json(?:;|$)/i.test(request.headers.get('Content-Type')||''))fail(415,'JSON形式で送信してください。');
   if(Number(request.headers.get('Content-Length'))>maxBytes)fail(413,'送信するデータが大きすぎます。');
   const reader=request.body?.getReader();
@@ -53,7 +59,7 @@ async function body(request,maxBytes=16384){
   const combined=new Uint8Array(length);let offset=0;for(const chunk of chunks){combined.set(chunk,offset);offset+=chunk.byteLength;}
   let parsed;try{parsed=JSON.parse(new TextDecoder().decode(combined));}catch(_){fail(400,'送信データを読み取れませんでした。');}
   if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))fail(400,'送信データが正しくありません。');
-  return parsed;
+  requestBodies.set(request,{value:parsed,bytes:length});return parsed;
 }
 async function profile(db,authId){
   let user=await first(db,`SELECT ${PUBLIC_FIELDS} FROM profiles WHERE auth_id=?`,authId);
@@ -65,6 +71,45 @@ async function profile(db,authId){
     if(user)return ownProfile(user);
   }
   fail(503,'プロフィールを作成できませんでした。もう一度お試しください。','profile_unavailable');
+}
+
+const hex=bytes=>Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('');
+const sha256=async value=>hex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))));
+function deviceToken(request){
+  const values=(request.headers.get('Cookie')||'').split(';').map(part=>part.trim()).filter(part=>part.startsWith(DEVICE_COOKIE+'='));
+  if(values.length!==1)return null;
+  const token=values[0].slice(DEVICE_COOKIE.length+1);
+  return /^[a-f0-9]{64}$/.test(token)?token:null;
+}
+function sessionCookie(token){return `${DEVICE_COOKIE}=${token}; Max-Age=${DEVICE_TTL/1000}; Path=/; Secure; HttpOnly; SameSite=Strict`;}
+async function limitSessionCreation(db,request,now){
+  // CF-Connecting-IP is supplied by the hosting edge. Never store the raw address
+  // or merge devices by address: a shared connection is not a shared identity.
+  const address=request.headers.get('CF-Connecting-IP')||'unavailable';
+  const fingerprint=await sha256(address),knownAddress=address!=='unavailable';
+  for(const [period,limit]of [[60000,knownAddress?10:100],[3600000,knownAddress?60:600]]){
+    const start=Math.floor(now/period)*period,key=`device:${period}:${start}:${fingerprint}`;
+    const result=await run(db,'INSERT INTO device_session_limits(bucket_key,attempts,expires_at) VALUES(?,1,?) ON CONFLICT(bucket_key) DO UPDATE SET attempts=attempts+1 WHERE attempts<?',key,start+period,limit);
+    if(!changed(result))fail(429,'接続の作成が続いています。少し待ってから、もう一度接続してください。','session_rate_limit');
+  }
+  await run(db,'DELETE FROM device_session_limits WHERE bucket_key IN(SELECT bucket_key FROM device_session_limits WHERE expires_at<? LIMIT 100)',now);
+}
+async function deviceSession(db,request,now,{create=false}={}){
+  let token=deviceToken(request),tokenHash=token?await sha256(token):null;
+  const row=tokenHash?await first(db,`SELECT ${PUBLIC_FIELDS},s.expires_at FROM profiles p JOIN device_sessions s ON s.user_id=p.id WHERE s.token_hash=? AND s.expires_at>?`,tokenHash,now):null;
+  if(row){
+    let cookie=null;
+    if(create&&row.expires_at<now+DEVICE_RENEW){await run(db,'UPDATE device_sessions SET expires_at=?,refreshed_at=? WHERE token_hash=?',now+DEVICE_TTL,now,tokenHash);cookie=sessionCookie(token);}
+    return {user:ownProfile(row),cookie};
+  }
+  if(!create)fail(401,'このブラウザの接続を確認できませんでした。もう一度接続してください。','session_required');
+  await limitSessionCreation(db,request,now);
+  token=hex(crypto.getRandomValues(new Uint8Array(32)));tokenHash=await sha256(token);
+  // Device profiles have new random IDs. Old hosted-account rows remain intact
+  // and are never selected, migrated or copied by a new browser session.
+  const user=await profile(db,'device:'+uuid());
+  await run(db,'INSERT INTO device_sessions(token_hash,user_id,created_at,refreshed_at,expires_at) VALUES(?,?,?,?,?)',tokenHash,user.id,now,now,now+DEVICE_TTL);
+  return {user,cookie:sessionCookie(token)};
 }
 
 function normalizeChannel(raw,userId){
@@ -165,35 +210,45 @@ export async function handleSocial(request,env){
   const method=request.method.toUpperCase();
   try{
     if(!['GET','POST','DELETE'].includes(method))fail(405,'この操作は利用できません。','method_not_allowed');
-    if(method!=='GET'){
-      const origin=request.headers.get('Origin');
-      if(origin&&origin!==url.origin)fail(403,'このサイト内から操作してください。','origin_forbidden');
-      if(request.headers.get('Sec-Fetch-Site')==='cross-site')fail(403,'このサイト内から操作してください。','origin_forbidden');
-    }
-    const authId=request.headers.get('oai-authenticated-user-id');
-    if(!authId){if(path==='/me'&&method==='GET')return json({signedIn:false});fail(401,'ChatGPTでログインすると交流機能を利用できます。','auth_required');}
-    if(authId.length>256)fail(401,'ログイン情報を確認できませんでした。','auth_required');
+    const origin=request.headers.get('Origin'),fetchSite=request.headers.get('Sec-Fetch-Site');
+    if(origin&&origin!==url.origin||fetchSite&&!['same-origin','none'].includes(fetchSite))fail(403,'このサイト内から操作してください。','origin_forbidden');
     const db=env?.DB;
     if(!db?.prepare||!db?.batch)fail(503,'交流機能のデータベースを準備しています。少し後にもう一度お試しください。','database_unavailable');
-    const user=await profile(db,authId);
     const now=Date.now();
-
-    if(path==='/me'&&method==='GET')return json({signedIn:true,user});
+    const session=await deviceSession(db,request,now,{create:path==='/me'&&method==='GET'}),user=session.user;
+    if(path==='/me'&&method==='GET'){
+      const response=json({connected:true,identityKind:'device',signedIn:true,user});
+      if(session.cookie)response.headers.set('Set-Cookie',session.cookie);
+      return response;
+    }
+    const expectedHeader=request.headers.get('X-Machi-User-Id');
+    if(expectedHeader&&expectedHeader!==user.id)fail(409,'このブラウザの接続が更新されました。もう一度接続してから操作してください。','session_identity_changed');
+    if(method!=='GET'){
+      const data=await body(request,path==='/voice/signal'?140000:path==='/belongings'?65536:path==='/home'?32768:16384);
+      if(data.expectedUserId!==user.id){
+        const code=path==='/profile'?'profile_identity_changed':path==='/home'?'home_identity_changed':path==='/belongings'?'belongings_identity_changed':'session_identity_changed';
+        fail(409,'このブラウザの保存先が変わりました。もう一度接続してから操作してください。',code);
+      }
+    }
     if(path==='/home'&&method==='GET'){
       const saved=await first(db,'SELECT layout_json,updated_at FROM player_rooms WHERE user_id=?',user.id);
-      return json({layout:saved?JSON.parse(saved.layout_json):null,updatedAt:saved?.updated_at??null});
+      return json({userId:user.id,layout:saved?JSON.parse(saved.layout_json):null,updatedAt:saved?.updated_at??null});
     }
     if(path==='/home'&&method==='POST'){
-      const data=await body(request,32768);const layout=roomLayout(data.layout);
+      const data=await body(request,32768);
+      if(data.expectedUserId!==undefined&&data.expectedUserId!==user.id)fail(409,'このブラウザの保存先が変わりました。再接続して自分の部屋を読み込んでください。','home_identity_changed');
+      const layout=roomLayout(data.layout);
       await run(db,'INSERT INTO player_rooms(user_id,layout_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET layout_json=excluded.layout_json,updated_at=excluded.updated_at',user.id,JSON.stringify(layout),now);
       return json({ok:true,layout,updatedAt:now});
     }
     if(path==='/belongings'&&method==='GET'){
       const saved=await first(db,'SELECT data_json,updated_at FROM player_belongings WHERE user_id=?',user.id);
-      return json({items:saved?JSON.parse(saved.data_json):[],updatedAt:saved?.updated_at??null});
+      return json({userId:user.id,items:saved?JSON.parse(saved.data_json):[],updatedAt:saved?.updated_at??null});
     }
     if(path==='/belongings'&&method==='POST'){
-      const data=await body(request,65536);const items=belongings(data.items);
+      const data=await body(request,65536);
+      if(data.expectedUserId!==undefined&&data.expectedUserId!==user.id)fail(409,'このブラウザの保存先が変わりました。持ち物画面で再同期して、自分の持ち物を読み込んでください。','belongings_identity_changed');
+      const items=belongings(data.items);
       await run(db,'INSERT INTO player_belongings(user_id,data_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET data_json=excluded.data_json,updated_at=excluded.updated_at',user.id,JSON.stringify(items),now);
       return json({ok:true,items,updatedAt:now});
     }
@@ -208,7 +263,7 @@ export async function handleSocial(request,env){
     if(path==='/profile'&&method==='POST'){
       const data=await body(request);
       // The expected ID is a session-change guard, never an ownership selector.
-      if(data.expectedUserId!==undefined&&data.expectedUserId!==user.id)fail(409,'ログイン中のアカウントが変わりました。現在のプロフィールを確認してください。','profile_identity_changed');
+      if(data.expectedUserId!==undefined&&data.expectedUserId!==user.id)fail(409,'このブラウザの保存先が変わりました。現在のプロフィールを確認してください。','profile_identity_changed');
       const expected=data.expectedVersion===undefined?user.version:data.expectedVersion;
       if(!Number.isSafeInteger(expected)||expected<0)fail(400,'プロフィールの保存状態を確認できません。','invalid_profile_version');
       const next={name:user.name,tagline:user.tagline,bio:user.bio,title:user.title,accent:user.accent,avatarIcon:user.avatarIcon,showName:user.showName};
