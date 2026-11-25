@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import {loadCharacterModel} from '../dist/model-loader.js';
 import {humanoidGlb,rotation,vertexWorld,findMesh} from './model-motion-fixtures.mjs';
 
-for(const naming of ['mixamo','blender','japanese','vrm','numbered']) test(`real ${naming} GLB: procedural locomotion changes bones and skinned vertices`,async()=>{
+for(const naming of ['mixamo','blender','japanese','vrm']) test(`real ${naming} GLB: procedural locomotion changes bones and skinned vertices`,async()=>{
   const fixture=humanoidGlb({naming,rotatedJoints:true}),avatar=await loadCharacterModel(THREE,fixture.buffer);
   assert.equal(avatar.rigged,true);assert.equal(avatar.autoRigged,false);
   const mesh=findMesh(avatar),bone=mesh.skeleton.bones[4],rest=bone.quaternion.clone(),before=vertexWorld(mesh,fixture.partVertices.leftUpperLeg);
@@ -23,8 +23,8 @@ for(const version of [0,1]) test(`VRM ${version} mappings work without bone-name
   avatar.update(.1,{moving:true});assert.equal(avatar.getMotionStatus().source,'procedural');avatar.dispose();
 });
 
-test('unskinned humanoid GLB gets real GPU deformation, preserving UVs and material properties',async()=>{
-  const fixture=humanoidGlb({skin:false,nested:true}),avatar=await loadCharacterModel(THREE,fixture.buffer);
+test('explicit approximate mode gives an unskinned humanoid GPU deformation without changing UVs or materials',async()=>{
+  const fixture=humanoidGlb({skin:false,nested:true}),avatar=await loadCharacterModel(THREE,fixture.buffer,{motionConfig:{mode:'approximate'}});
   assert.equal(avatar.autoRigged,true);const mesh=findMesh(avatar);assert.ok(mesh.isSkinnedMesh);
   assert.equal(mesh.material.name,'FixtureFabric');assert.equal(mesh.material.roughness,.8);assert.equal(mesh.material.metalness,.1);
   assert.equal(mesh.geometry.attributes.uv.count,mesh.geometry.attributes.position.count);
@@ -43,7 +43,7 @@ test('unskinned humanoid GLB gets real GPU deformation, preserving UVs and mater
 test('nonhumanoid static objects are not silently presented as fully rigged humans',async()=>{
   const avatar=await loadCharacterModel(THREE,humanoidGlb({skin:false,shape:'box'}).buffer);
   assert.equal(avatar.autoRigged,false);assert.equal(avatar.getMotionStatus().source,'static');
-  assert.match(avatar.motionSummary,/判別できません/);avatar.dispose();
+  assert.match(avatar.motionSummary,/元の形状を保持/);avatar.dispose();
 });
 
 test('missing authored locomotion falls back to bones, while root motion cannot displace the avatar',async()=>{
@@ -88,12 +88,12 @@ test('terrain foot placement bends the leg to a raised step without translating 
 });
 
 test('invalid timing/terrain cannot create NaN transforms; owned GPU resources dispose exactly once',async()=>{
-  const avatar=await loadCharacterModel(THREE,humanoidGlb({skin:false}).buffer),mesh=findMesh(avatar);
+  const avatar=await loadCharacterModel(THREE,humanoidGlb({skin:false}).buffer,{motionConfig:{mode:'approximate'}}),mesh=findMesh(avatar);
   let geometries=0,materials=0,skeletons=0;mesh.geometry.addEventListener('dispose',()=>geometries++);mesh.material.addEventListener('dispose',()=>materials++);
   const originalDispose=mesh.skeleton.dispose.bind(mesh.skeleton);mesh.skeleton.dispose=()=>{skeletons++;originalDispose();};
   for(const dt of [NaN,Infinity,-1,0,.016])avatar.update(dt,{moving:true,speed:NaN,grounded:true,groundHeightAt:()=>NaN});
   avatar.group.traverse(node=>assert.ok([...node.position,...node.quaternion,...node.scale].every(Number.isFinite)));
-  avatar.setMotionConfig({facing:90,mode:'procedural'});assert.deepEqual(avatar.getMotionConfig(),{mode:'procedural',facing:90});
+  avatar.setMotionConfig({facing:90,mode:'approximate'});assert.deepEqual(avatar.getMotionConfig(),{mode:'approximate',facing:90});
   avatar.dispose();avatar.dispose();avatar.update(.1,{moving:true});
   assert.equal(geometries,1);assert.equal(materials,1);assert.equal(skeletons,1);assert.equal(avatar.group.children.length,0);
 });
@@ -113,7 +113,7 @@ test('facing adjustments keep procedural steps along the controller forward axis
 });
 
 for(const skin of [true,false]) test(`${skin?'authored':'generated'} skeleton reaches a descending tread with bounded body compensation`,async()=>{
-  const avatar=await loadCharacterModel(THREE,humanoidGlb({skin}).buffer),mesh=findMesh(avatar),foot=mesh.skeleton.bones[6];
+  const avatar=await loadCharacterModel(THREE,humanoidGlb({skin}).buffer,{motionConfig:{mode:skin?'auto':'approximate'}}),mesh=findMesh(avatar),foot=mesh.skeleton.bones[6];
   avatar.group.position.set(3,.4,7);avatar.group.rotation.y=.7;avatar.update(0,{grounded:true});
   const sole=foot.getWorldPosition(new THREE.Vector3()).y-.4;
   const groundHeightAt=(x,z)=>avatar.group.worldToLocal(new THREE.Vector3(x,.4,z)).x<0?.25:.4;

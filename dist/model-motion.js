@@ -3,7 +3,7 @@
 export function createModelMotion(THREE, {source, group, facing, bones, clips, rigged, frontSign=-1, mode='auto'}) {
   const states=new Map();
   const baseFacingY=facing.position.y;let pelvisDrop=0;
-  const remember=node=>{if(!states.has(node)) states.set(node,{position:node.position.clone(),quaternion:node.quaternion.clone(),scale:node.scale.clone()});};
+  const remember=node=>{if(!states.has(node)) states.set(node,{position:node.position.clone(),quaternion:node.quaternion.clone(),scale:node.scale.clone(),morph:node.morphTargetInfluences?.slice()});};
   source.traverse(remember);Object.values(bones).forEach(remember);
   const neutral=new Map(), modelX=new THREE.Vector3(1,0,0), modelDown=new THREE.Vector3(0,-1,0);
   const q=new THREE.Quaternion(), parentQ=new THREE.Quaternion(), frameQ=new THREE.Quaternion();
@@ -29,8 +29,7 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
     if(foot) footOffsets[side]=Math.max(.015,Math.min(.24,foot.getWorldPosition(new THREE.Vector3()).y-group.getWorldPosition(new THREE.Vector3()).y));
   }
   const rootNodes=new Set([source]);
-  if(bones.hips) for(let node=bones.hips;node && node!==source.parent;node=node.parent) rootNodes.add(node);
-  else for(const node of source.children) rootNodes.add(node);
+  if(rigged&&bones.hips)for(let node=bones.hips;node&&node!==source.parent;node=node.parent)rootNodes.add(node);
   const inPlaceClips=clips.map(clip=>makeInPlace(THREE,clip,source,rootNodes,states));
   const bodyMotion=new Map(inPlaceClips.map(clip=>[clip,clip.tracks.some(track=>{
     let path;try{path=THREE.PropertyBinding.parseTrackName(track.name);}catch{return false;}
@@ -49,24 +48,25 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
   };
   const mixer=inPlaceClips.length?new THREE.AnimationMixer(source):null;
   const actions=new Map(inPlaceClips.map(clip=>[clip,mixer.clipAction(clip)]));
-  let activeAction=null,activeClip=null,activeRole=null,phase=0,disposed=false,lastMode=mode;
+  let activeAction=null,activeClip=null,activeRole=null,phase=0,disposed=false,lastMode=mode,locomotionBlend=0;
   let status={role:'idle',source:'static',clip:null,time:0,completed:false,footCorrections:0};
-  const restore=()=>{facing.position.y=baseFacingY;for(const [node,state] of states) {node.position.copy(state.position);node.quaternion.copy(state.quaternion);node.scale.copy(state.scale);}};
+  const restore=()=>{facing.position.y=baseFacingY;for(const [node,state]of states){node.position.copy(state.position);node.quaternion.copy(state.quaternion);node.scale.copy(state.scale);if(state.morph&&node.morphTargetInfluences)for(let i=0;i<state.morph.length;i++)node.morphTargetInfluences[i]=state.morph[i];}};
   function rotate(key,amount,z=0) {
     const bone=bones[key];if(!bone)return;
-    if(neutral.has(bone))bone.quaternion.copy(neutral.get(bone));
+    if(neutral.has(bone))bone.quaternion.slerp(neutral.get(bone),locomotionBlend);
     if(!bone.parent)return;
     bone.parent.updateWorldMatrix(true,false);bone.parent.getWorldQuaternion(parentQ).invert();
     if(amount) {
       axis.copy(modelX).applyQuaternion(frameQ).applyQuaternion(parentQ).normalize();
-      bone.quaternion.premultiply(q.setFromAxisAngle(axis,amount*frontSign));
+      bone.quaternion.premultiply(q.setFromAxisAngle(axis,amount*frontSign*locomotionBlend));
     }
     if(z) {
       axis.set(0,0,1).applyQuaternion(frameQ).applyQuaternion(parentQ).normalize();
-      bone.quaternion.premultiply(q.setFromAxisAngle(axis,z));
+      bone.quaternion.premultiply(q.setFromAxisAngle(axis,z*locomotionBlend));
     }
   }
   function procedural(role,moving,running,verticalVelocity) {
+    if(locomotionBlend<.00001)return;
     const jumping=role==='jump',wave=Math.sin(phase),swing=moving&&!jumping?wave*(running?.69:.42):0;
     const knee=moving&&!jumping?(running?1.0:.53):0,breath=!moving&&!jumping?Math.sin(phase)*.018:0;
     const falling=jumping&&verticalVelocity<-.2;
@@ -83,12 +83,17 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
     rotate('rightLowerArm',jumping?-.3:running&&moving?-.65:-.12);
   }
   function select(role) {
-    if(mode==='procedural' && rigged) return null;
+    if(['original','procedural','approximate'].includes(mode))return null;
     const namedClip=named[role] || (role==='run'?named.walk:null);
     // A clip called Walk that only translates the scene has no leg animation.
     // Generate locomotion instead of treating that translation as a moving rig.
     if(namedClip && (mode==='authored' || !rigged || role==='idle' || bodyMotion.get(namedClip)))return namedClip;
-    if(mode==='authored' || !rigged) return inPlaceClips[0]||null;
+    if(mode==='authored')return inPlaceClips[0]||null;
+    // Exporters often call a working animation Take 001 or ArmatureAction. Keep
+    // those clips instead of replacing their authored motion with guessed bones.
+    const unclassified=inPlaceClips.find(candidate=>!Object.values(named).includes(candidate));
+    if(unclassified)return unclassified;
+    if(!rigged)return inPlaceClips[0]||null;
     return null;
   }
   function play(clip,role,speed) {
@@ -110,6 +115,8 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
     const speed=Number.isFinite(context.speed)?Math.max(0,context.speed):running?4.2:1.6;
     const delta=Math.max(0,Math.min(.1,Number.isFinite(dt)?dt:0));
     const role=jumping||!grounded?'jump':moving?running?'run':'walk':'idle';
+    const desiredBlend=role==='idle'?0:1;
+    locomotionBlend+=(desiredBlend-locomotionBlend)*(delta>0?1-Math.exp(-delta*18):0);
     phase=(phase+delta*(moving?(running?11.5:7.3)*Math.max(.35,Math.min(1.8,speed/(running?4.2:1.6))):1.6))%(Math.PI*200);
     if(lastMode!==mode) {mixer?.stopAllAction();activeAction=activeClip=activeRole=null;lastMode=mode;}
     restore();group.updateWorldMatrix(true,false);group.getWorldQuaternion(frameQ);
@@ -131,7 +138,7 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
     }
     else {
       if(activeAction) {mixer.stopAllAction();activeAction=activeClip=activeRole=null;restore();}
-      if(rigged)procedural(role,moving,running,verticalVelocity);
+      if(rigged&&!['original','authored'].includes(mode))procedural(role,moving,running,verticalVelocity);
     }
     // A malformed clip must not poison the scene graph or the player transform.
     for(const [node,state] of states) {
@@ -143,7 +150,10 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
     // updateWorldMatrix(). Keep CPU bounds/vertices correct before rendering too.
     group.updateMatrixWorld(true);
     let footCorrections=0;
-    if(rigged && grounded && !jumping && typeof groundHeightAt==='function') {
+    const generatedMotion=rigged&&!clip&&!['original','authored'].includes(mode);
+    // Authored clips, ambiguous rigs and Original mode keep their exact pose.
+    // Terrain-driven IK is only layered onto verified, generated locomotion.
+    if(generatedMotion && grounded && !jumping && typeof groundHeightAt==='function') {
       const base=Number.isFinite(groundHeight)?groundHeight:group.getWorldPosition(new THREE.Vector3()).y;
       const targets=[];let requiredDrop=0;
       for(const side of ['left','right']) {
@@ -175,7 +185,7 @@ export function createModelMotion(THREE, {source, group, facing, bones, clips, r
       }
     } else pelvisDrop=0;
     group.updateMatrixWorld(true);
-    status={role,source:clip?'authored':rigged?'procedural':'static',clip:clip?.name||null,time:activeAction?.time||0,
+    status={role,source:clip?'authored':generatedMotion?'procedural':'static',clip:clip?.name||null,time:activeAction?.time||0,
       completed:Boolean(activeAction?.paused&&role==='jump'),footCorrections,bodyOffset:pelvisDrop?-pelvisDrop:0};
   }
   function dispose() {

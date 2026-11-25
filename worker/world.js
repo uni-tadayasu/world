@@ -21,7 +21,7 @@ function worldHeaders(request,extra={}){
 function worldError(request,message,status=503){return Response.json({error:message},{status,headers:worldHeaders(request,{'Cache-Control':'no-store',...(status===429?{'Retry-After':'30'}:{})})});}
 export function worldQuery(latitude,longitude,radius){
   const around=`(around:${radius},${latitude.toFixed(6)},${longitude.toFixed(6)})`;
-  return `[out:json][timeout:17][maxsize:25165824];(way${around}["building"];way${around}["building:part"];way${around}["highway"];way${around}["leisure"];way${around}["landuse"];way${around}["natural"~"^(water|wood|scrub|wetland|beach)$"];way${around}["waterway"];relation${around}["type"="multipolygon"]["natural"="water"];node${around}["shop"];node${around}["amenity"];node${around}["entrance"];node${around}["natural"="tree"];);out geom;`;
+  return `[out:json][timeout:17][maxsize:25165824];(way${around}["building"];way${around}["building:part"];way${around}["highway"];way${around}["leisure"];way${around}["landuse"];way${around}["natural"~"^(water|wood|scrub|wetland|beach)$"];way${around}["waterway"];relation${around}["type"="multipolygon"]["natural"="water"];node${around}["shop"];node${around}["amenity"];node${around}["entrance"];node${around}["natural"="tree"];node${around}["highway"="street_lamp"];);out geom;`;
 }
 async function worldUpstream(latitude,longitude,radius){
   const providers=[{name:'private.coffee',url:'https://overpass.private.coffee/api/interpreter'}];
@@ -60,7 +60,7 @@ export async function handleWorld(request,env,ctx={}){
   if(!url.searchParams.has('lat')||!url.searchParams.has('lon')||!url.searchParams.get('lat').trim()||!url.searchParams.get('lon').trim())return worldError(request,'緯度・経度を指定してください。',400);
   const latitude=Number(url.searchParams.get('lat')),longitude=Number(url.searchParams.get('lon')),radius=Number(url.searchParams.get('radius')||250);
   if(!Number.isFinite(latitude)||!Number.isFinite(longitude)||Math.abs(latitude)>85||Math.abs(longitude)>180||!Number.isFinite(radius)||radius<50||radius>450)return worldError(request,'地図の取得範囲が正しくありません。',400);
-  const lat=Math.round(latitude*10000)/10000,lon=Math.round(longitude*10000)/10000,r=Math.ceil(radius),key=`${lat},${lon},${r}`,now=Date.now();
+  const lat=Math.round(latitude*10000)/10000,lon=Math.round(longitude*10000)/10000,r=Math.ceil(radius),key=`v2:${lat},${lon},${r}`,now=Date.now();
   const cacheRequest=new Request(url.origin+'/__world_cache/'+encodeURIComponent(key));
   let cached=WORLD_MEMORY.get(key);if(cached&&cached.expiry<=now){worldForget(key);cached=null;}
   if(!cached&&typeof caches!=='undefined'){try{const hit=await caches.default.match(cacheRequest);if(hit)cached={text:await hit.text(),provider:hit.headers.get('X-World-Provider'),expiry:now+60000};}catch{}}

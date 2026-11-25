@@ -1,5 +1,6 @@
 // Browser-owned community, messaging and opt-in WebRTC signalling for MACHI LIFE.
 // An opaque HttpOnly session cookie supplies identity; account headers and client IDs do not.
+import {handleExchangeRequest} from './exchange.js';
 const PREFIX='/api/social';
 const VOICE_TTL=45000;
 const SIGNAL_TTL=120000;
@@ -230,6 +231,7 @@ export async function handleSocial(request,env){
         fail(409,'このブラウザの保存先が変わりました。もう一度接続してから操作してください。',code);
       }
     }
+    if(path==='/exchange'||path.startsWith('/exchange/'))return handleExchangeRequest({request,db,user,path,method,now});
     if(path==='/home'&&method==='GET'){
       const saved=await first(db,'SELECT layout_json,updated_at FROM player_rooms WHERE user_id=?',user.id);
       return json({userId:user.id,layout:saved?JSON.parse(saved.layout_json):null,updatedAt:saved?.updated_at??null});
