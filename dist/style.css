@@ -47,3 +47,6 @@ body .machi-voice-dock .voice-dock-btn{width:44px;height:44px}@media(max-height:
   .intro-copy{top:77px;max-height:calc(100dvh - 180px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#6e92c34d transparent;padding-right:8px}
   .intro-location small{font-size:10px}
 }
+
+/* Commercial links remain available without adding controls over the game. */
+.intro-links{display:flex;align-items:center;gap:16px;pointer-events:auto;font-size:12px;letter-spacing:normal;min-height:32px}.intro-links a{padding:7px 0;text-decoration:underline;text-underline-offset:4px}.intro-bottom{align-items:center;gap:12px}a.menu-card{cursor:pointer}@media(max-width:390px){.intro-bottom>span:last-child{display:none}}

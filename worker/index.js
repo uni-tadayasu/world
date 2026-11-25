@@ -1,5 +1,6 @@
 import {handleSocial} from './social.js';
 import {handleWorld} from './world.js';
+import {handleSponsors} from './sponsors.js';
 
 const SECURITY = {
   'X-Content-Type-Options':'nosniff',
@@ -11,6 +12,19 @@ const SECURITY = {
 export default {
   async fetch(request,env,ctx) {
     const url=new URL(request.url);
+    if(url.pathname==='/api/sponsors'||url.pathname.startsWith('/api/sponsors/')){
+      const security={...SECURITY,'Referrer-Policy':'no-referrer','Cache-Control':'no-store'};
+      try{
+        const response=await handleSponsors(request,env);
+        const headers=new Headers(response.headers);
+        Object.entries(security).forEach(([key,value])=>headers.set(key,value));
+        return new Response(response.body,{status:response.status,headers});
+      }catch{
+        // Payment bodies, buyer details and credentials must never enter logs.
+        console.error('Sponsor request failed');
+        return Response.json({error:'スポンサー情報を確認できませんでした。時間をおいて再度お試しください。'},{status:503,headers:security});
+      }
+    }
     if(url.pathname==='/api/world'||url.pathname.startsWith('/api/terrain/')){
       try{return await handleWorld(request,env,ctx);}catch{return Response.json({error:'地図の中継に接続できませんでした。狭い範囲で再試行してください。'},{status:503,headers:{...SECURITY,'Access-Control-Allow-Origin':'https://uni-tadayasu.github.io','Cache-Control':'no-store'}});}
     }
@@ -38,6 +52,14 @@ export default {
     const asset=STATIC_ASSETS[path];
     if(!asset)return new Response('Not found',{status:404,headers:SECURITY});
     const headers={...SECURITY,'Content-Type':asset.type,'Cache-Control':path.endsWith('.html')?'no-cache':'public, max-age=3600','ETag':asset.etag};
+    if(['/sponsors.html','/sponsor-admin.html','/sponsor-terms.html','/commerce.html'].includes(path)){
+      headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self' https://buy.stripe.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+      headers['Referrer-Policy']='no-referrer';
+      if(path==='/sponsor-admin.html'||url.searchParams.has('session_id')){
+        headers['Cache-Control']='no-store';
+        headers['X-Robots-Tag']='noindex, nofollow';
+      }
+    }
     if(request.headers.get('If-None-Match')===asset.etag)return new Response(null,{status:304,headers});
     const binary=atob(asset.data),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
     return new Response(request.method==='HEAD'?null:bytes,{headers});

@@ -95,6 +95,15 @@ async function limitSessionCreation(db,request,now){
   }
   await run(db,'DELETE FROM device_session_limits WHERE bucket_key IN(SELECT bucket_key FROM device_session_limits WHERE expires_at<? LIMIT 100)',now);
 }
+async function limitExchangeActivity(db,userId,now){
+  // Simulation has no cash value, but its writes still consume server resources.
+  for(const [period,maximum]of [[60000,60],[3600000,500]]){
+    const start=Math.floor(now/period)*period,key=`exchange-sandbox:${period}:${start}:${userId}`;
+    const result=await run(db,'INSERT INTO device_session_limits(bucket_key,attempts,expires_at) VALUES(?,1,?) ON CONFLICT(bucket_key) DO UPDATE SET attempts=attempts+1 WHERE attempts<?',key,start+period,maximum);
+    if(!changed(result))fail(429,'検証操作が続いています。少し待ってから記録を更新してください。','exchange_rate_limit');
+  }
+  await run(db,'DELETE FROM device_session_limits WHERE bucket_key IN(SELECT bucket_key FROM device_session_limits WHERE expires_at<? LIMIT 100)',now);
+}
 async function deviceSession(db,request,now,{create=false}={}){
   let token=deviceToken(request),tokenHash=token?await sha256(token):null;
   const row=tokenHash?await first(db,`SELECT ${PUBLIC_FIELDS},s.expires_at FROM profiles p JOIN device_sessions s ON s.user_id=p.id WHERE s.token_hash=? AND s.expires_at>?`,tokenHash,now):null;
@@ -224,14 +233,19 @@ export async function handleSocial(request,env){
     }
     const expectedHeader=request.headers.get('X-Machi-User-Id');
     if(expectedHeader&&expectedHeader!==user.id)fail(409,'このブラウザの接続が更新されました。もう一度接続してから操作してください。','session_identity_changed');
+    let exchangeData;
     if(method!=='GET'){
       const data=await body(request,path==='/voice/signal'?140000:path==='/belongings'?65536:path==='/home'?32768:16384);
+      exchangeData=data;
       if(data.expectedUserId!==user.id){
         const code=path==='/profile'?'profile_identity_changed':path==='/home'?'home_identity_changed':path==='/belongings'?'belongings_identity_changed':'session_identity_changed';
         fail(409,'このブラウザの保存先が変わりました。もう一度接続してから操作してください。',code);
       }
     }
-    if(path==='/exchange'||path.startsWith('/exchange/'))return handleExchangeRequest({request,db,user,path,method,now});
+    if(path==='/exchange'||path.startsWith('/exchange/')){
+      if(method!=='GET'&&path.startsWith('/exchange/sandbox/'))await limitExchangeActivity(db,user.id,now);
+      return handleExchangeRequest({request,db,user,path,method,now,data:exchangeData});
+    }
     if(path==='/home'&&method==='GET'){
       const saved=await first(db,'SELECT layout_json,updated_at FROM player_rooms WHERE user_id=?',user.id);
       return json({userId:user.id,layout:saved?JSON.parse(saved.layout_json):null,updatedAt:saved?.updated_at??null});
