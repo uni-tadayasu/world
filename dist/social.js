@@ -1,5 +1,6 @@
 /** Authenticated community UI and opt-in, four-participant WebRTC voice. */
-export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='https://machi-life.hisa-0128-1996.chatgpt.site'}={}) {
+import {createProfile,profileAvatarMarkup} from './profile.js';
+export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,profile:profileController=null,baseUrl='https://machi-life.hisa-0128-1996.chatgpt.site'}={}) {
   const esc=escapeHTML||(value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])));
   const paths={chat:'M21 11.5a8.4 8.4 0 0 1-1 4L21 21l-5.5-1a8.4 8.4 0 0 1-4 1A9 9 0 1 1 21 11.5Z',users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',mic:'M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8',micoff:'M9 5a3 3 0 0 1 6 0v7M9 9v3a3 3 0 0 0 5 2.2M5 10v2a7 7 0 0 0 12 4.9M19 10v2c0 .5 0 1-.2 1.5M12 19v3M8 22h8M2 2l20 20',phone:'M5 15c4-5 10-5 14 0M3 14l2-2 4 2-1 4-5-1ZM21 14l-2-2-4 2 1 4 5-1Z',building:'M4 21V5h10v16M14 10h6v11M8 9h2M8 13h2M8 17h2M17 14h1M17 18h1M2 21h20',edit:'M16 3l5 5M4 20l4-1L21 6a2 2 0 0 0-3-3L5 16l-1 4Z',copy:'M9 9h12v12H9ZM5 15H3V3h12v2',sound:'M11 5L6 9H2v6h4l5 4V5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14'};
   const ico=name=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.users}"/></svg>`;
@@ -9,7 +10,9 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
   const apiBase='/api/social';
   let shell=null,body=null,visible=false,generation=0,chatTimer=null,pollBusy=false,pollTick=0;
   let authenticated=null,user=null,state={friends:{incoming:[],outgoing:[],accepted:[]},organizations:[],blocks:[]};
-  let tab='chat',channel='global',messages=[],since=0,error='',profileEditing=false;
+  let tab='chat',channel='global',messages=[],since=0,error='';
+  let ownedProfile=null;
+  const profiles=()=>profileController||(ownedProfile??=createProfile({openPanel,toast}));
   let searchQuery='',searchResults=null,orgs=[],orgDetail=null,orgMembers=[],createOrg=false,leaveConfirm=false;
   let menuMessage=null,reportMessage=null,reportReason='',loadingChannel=false;
   const drafts=new Map();
@@ -21,8 +24,8 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
   const friendRows=()=>state.friends?.accepted||[];
   const joinedOrgs=()=>state.organizations||[];
   const nameOfChannel=value=>value==='global'?'街の広場':value.startsWith('dm:')?friendRows().find(r=>r.user.id===value.slice(3))?.user.name||'フレンドとの会話':joinedOrgs().find(o=>o.id===value.slice(4))?.name||'コミュニティ';
-  const tone=u=>[...String(u.id||u.name)].reduce((sum,c)=>sum+c.charCodeAt(0),0)%6;
-  const avatar=u=>`<span class="social-avatar tone-${tone(u)}" aria-hidden="true">${esc([...String(u.name||'?')][0])}</span>`;
+  const avatar=u=>profileAvatarMarkup(u,42,'social-avatar');
+  const profileName=(u,kind='person',suffix='')=>`<button type="button" class="social-${kind}-name-link" data-action="view-profile" data-user="${esc(u.id)}" aria-label="${esc(u.name)}のプロフィール">${esc(u.name)}${suffix}</button>`;
   const btn=(label,action,attrs='',cls='')=>`<button type="button" class="social-btn ${cls}" data-action="${action}" ${attrs}>${label}</button>`;
   const empty=(title,detail='')=>`<div class="social-empty"><strong>${esc(title)}</strong>${esc(detail)}</div>`;
   const isVisible=()=>visible&&shell?.isConnected&&shell.getClientRects().length>0;
@@ -56,8 +59,7 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
     if(authenticated===null){shell.innerHTML=error?`<div class="social-auth"><h3>接続を確認できませんでした。</h3><p>${esc(error)}</p>${btn('もう一度接続','retry-connect','','primary')}</div>`:`<div class="social-loading" role="status">アカウントを確認しています…</div>`;return;}
     if(!authenticated){shell.innerHTML=`<div class="social-auth"><span class="social-hero-icon">${ico('users')}</span><h3>あなたの名前で、<br>街の会話に参加しよう。</h3><p>ChatGPTアカウントでログインすると、チャットやフレンド登録、コミュニティ、最大4人の音声通話を利用できます。</p><a class="social-btn primary" href="/signin-with-chatgpt?return_to=/" target="_top">ChatGPTでログイン</a><p class="social-note">会話にはゲーム内の表示名とフレンドコードを使います。メールアドレスは表示されません。</p></div>${error?`<div class="social-error" role="alert">${esc(error)}</div>`:''}`;return;}
     const incoming=state.friends?.incoming?.length||0;
-    shell.innerHTML=`<div class="social-profile">${avatar(user)}<div class="social-profile-info"><strong>${esc(user.name)}</strong><span class="social-code">ID ${esc(user.code)}</span></div><div class="social-profile-actions">${btn(ico('copy'),'copy-code','aria-label="フレンドコードをコピー"')}${btn(ico('edit'),'edit-profile','aria-label="表示名を変更"')}</div></div>
-      ${profileEditing?`<form class="social-form" data-form="profile"><label>ゲーム内の表示名<input name="name" data-focus="profile-name" value="${esc(user.name)}" minlength="2" maxlength="32" required autocomplete="nickname"></label><div class="social-form-actions">${btn('キャンセル','cancel-profile')}<button class="social-btn primary" type="submit">保存する</button></div></form>`:''}
+    shell.innerHTML=`<div class="social-profile">${avatar(user)}<div class="social-profile-info"><strong>${profileName(user,'profile')}</strong><span class="social-code">ID ${esc(user.code)}</span></div><div class="social-profile-actions">${btn(ico('copy'),'copy-code','aria-label="フレンドコードをコピー"')}${btn(ico('edit'),'edit-profile','aria-label="プロフィールを編集"')}</div></div>
       <nav class="social-tabs" aria-label="つながりのメニュー">${[['chat','チャット'],['friends','フレンド'],['orgs','コミュニティ'],['voice','通話']].map(([key,label])=>`<button type="button" class="social-tab ${tab===key?'active':''}" data-action="tab" data-tab="${key}" aria-current="${tab===key?'page':'false'}">${label}${key==='friends'&&incoming?`<span class="social-badge">${incoming}</span>`:''}</button>`).join('')}</nav>
       ${error?`<div class="social-error" role="alert">${esc(error)} ${btn('閉じる','clear-error','','quiet')}</div>`:''}
       <div class="social-content">${tab==='chat'?chatHTML():tab==='friends'?friendsHTML():tab==='orgs'?orgHTML():voiceHTML()}</div>`;
@@ -78,11 +80,11 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
     const list=shell?.querySelector('.social-messages');if(!list)return;
     const nearBottom=list.scrollHeight-list.clientHeight-list.scrollTop<80,previous=list.scrollTop;
     const blocked=new Set((state.blocks||[]).map(u=>u.id));const shown=messages.filter(m=>!blocked.has(m.user.id));
-    list.innerHTML=shown.length?shown.map(m=>`<article class="social-message ${m.mine?'mine':''}">${avatar(m.user)}<div class="social-message-content"><div class="social-message-meta"><strong>${esc(m.user.name)}${m.mine?' · あなた':''}</strong><time>${esc(formatTime(m.createdAt))}</time>${!m.mine?`<button type="button" class="social-msg-menu" data-action="message-menu" data-id="${esc(m.id)}" aria-label="${esc(m.user.name)}のメッセージの操作">···</button>`:''}</div><div class="social-bubble">${esc(m.text)}</div></div></article>`).join(''):loadingChannel?'<div class="social-loading" role="status">会話を読み込んでいます…</div>':empty('まだメッセージはありません','ひとことから、会話をはじめられます。');
+    list.innerHTML=shown.length?shown.map(m=>`<article class="social-message ${m.mine?'mine':''}">${avatar(m.user)}<div class="social-message-content"><div class="social-message-meta"><strong>${profileName(m.user,'message',m.mine?' · あなた':'')}</strong><time>${esc(formatTime(m.createdAt))}</time>${!m.mine?`<button type="button" class="social-msg-menu" data-action="message-menu" data-id="${esc(m.id)}" aria-label="${esc(m.user.name)}のメッセージの操作">···</button>`:''}</div><div class="social-bubble">${esc(m.text)}</div></div></article>`).join(''):loadingChannel?'<div class="social-loading" role="status">会話を読み込んでいます…</div>':empty('まだメッセージはありません','ひとことから、会話をはじめられます。');
     if(scroll&&nearBottom)list.scrollTop=list.scrollHeight;else list.scrollTop=previous;
   }
   function personRow(u,actions,subtitle=''){
-    return `<div class="social-person">${avatar(u)}<div class="social-person-main"><strong>${esc(u.name)}</strong><small>${esc(subtitle||u.code)}</small></div><div class="social-person-actions">${actions}</div></div>`;
+    return `<div class="social-person">${avatar(u)}<div class="social-person-main"><strong>${profileName(u)}</strong><small>${esc(subtitle||u.code)}</small></div><div class="social-person-actions">${actions}</div></div>`;
   }
   function friendsHTML(){
     const incoming=state.friends?.incoming||[],outgoing=state.friends?.outgoing||[],accepted=friendRows();
@@ -112,13 +114,15 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
       <details class="social-disclosure"><summary>接続設定 · TURNサーバー</summary><form class="social-form" data-form="turn"><p class="social-note">音声はWebRTCで接続します。通信環境によってはTURNサーバーが必要です。利用できるサーバーの情報をお持ちの場合に設定してください。</p><label>TURN URL<input name="turn-url" data-focus="turn-url" value="${esc(turn.url)}" placeholder="turn:example.com:3478" autocomplete="off"></label><label>ユーザー名<input name="turn-user" data-focus="turn-user" value="${esc(turn.username)}" autocomplete="off"></label><label>認証情報<input name="turn-credential" data-focus="turn-credential" type="password" autocomplete="off"></label><p class="social-note">この端末だけに保存され、次回の通話参加から使われます。</p><div class="social-form-actions">${btn('設定を消す','turn-clear')}<button class="social-btn" type="submit">保存する</button></div></form></details></div>`;
   }
   async function refreshState({redraw=false}={}){
-    const previous=JSON.stringify(state);const result=await api('/state');state=result;user=result.user;authenticated=true;
+    const token=generation,previous=JSON.stringify(state);const result=await api('/state');if(token!==generation)return;
+    if(user?.id===result.user?.id&&user.version>result.user.version)result.user=user;
+    state=result;user=result.user;authenticated=true;
     if(redraw||(JSON.stringify(state)!==previous&&tab!=='chat'))render(true);
   }
   async function loadMessages(reset=false){
-    const requested=channel;if(reset){messages=[];since=0;loadingChannel=true;renderMessages();}
+    const token=generation,requested=channel;if(reset){messages=[];since=0;loadingChannel=true;renderMessages();}
     const result=await api(`/messages?channel=${encodeURIComponent(requested)}&since=${reset?0:since}`);
-    if(requested!==channel)return;
+    if(token!==generation||requested!==channel)return;
     const incoming=Array.isArray(result.messages)?result.messages:[];
     if(reset)messages=[];
     const ids=new Set(messages.map(m=>String(m.id)));let changed=reset||loadingChannel;
@@ -126,8 +130,8 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
     messages.sort((a,b)=>Number(a.id)-Number(b.id));if(messages.length>100)messages=messages.slice(-100);loadingChannel=false;
     if(changed&&tab==='chat'&&isVisible()){renderMessages(true);if(reset){const list=shell.querySelector('.social-messages');if(list)list.scrollTop=list.scrollHeight;}}
   }
-  async function loadOrgs(){const result=await api('/organizations');orgs=result.organizations||[];if(tab==='orgs')render();}
-  async function loadOrg(id){orgDetail=orgs.find(o=>o.id===id)||joinedOrgs().find(o=>o.id===id);if(!orgDetail)return;orgMembers=[];leaveConfirm=false;render();if(joinedOrgs().some(o=>o.id===id)){const result=await api(`/organizations/${encodeURIComponent(id)}/members`);if(orgDetail?.id===id){orgMembers=result.members||[];render();}}}
+  async function loadOrgs(){const token=generation,result=await api('/organizations');if(token!==generation)return;orgs=result.organizations||[];if(tab==='orgs')render();}
+  async function loadOrg(id){const token=generation;orgDetail=orgs.find(o=>o.id===id)||joinedOrgs().find(o=>o.id===id);if(!orgDetail)return;orgMembers=[];leaveConfirm=false;render();if(joinedOrgs().some(o=>o.id===id)){const result=await api(`/organizations/${encodeURIComponent(id)}/members`);if(token===generation&&orgDetail?.id===id){orgMembers=result.members||[];render();}}}
   function startPolling(){
     clearInterval(chatTimer);chatTimer=setInterval(async()=>{
       if(!isVisible()){close();return;}if(!authenticated||pollBusy)return;pollBusy=true;
@@ -168,8 +172,6 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
         const sentChannel=channel;const result=await api(`/messages?channel=${encodeURIComponent(sentChannel)}`,{method:'POST',data:{text}});
         if(drafts.get(sentChannel)===String(data.get('message')||''))drafts.set(sentChannel,'');
         if(channel===sentChannel){if(result.message&&!messages.some(m=>String(m.id)===String(result.message.id)))messages.push(result.message);since=Math.max(since,Number(result.message?.id)||0);render();const list=shell.querySelector('.social-messages');if(list)list.scrollTop=list.scrollHeight;shell.querySelector('[name="message"]')?.focus();}
-      }else if(form.dataset.form==='profile'){
-        const result=await api('/profile',{method:'POST',data:{name:String(data.get('name')||'').trim()}});user=result.user;state.user=user;profileEditing=false;render();toast('表示名を保存しました。');
       }else if(form.dataset.form==='search'){
         searchQuery=String(data.get('query')||'').trim();if(searchQuery.length<3)throw new Error('3文字以上のコード・表示名を入力してください。');const result=await api(`/users?q=${encodeURIComponent(searchQuery)}`);searchResults=result.users||[];render();
       }else if(form.dataset.form==='org-create'){
@@ -187,8 +189,8 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
       if(action==='retry-connect')await connect();
       else if(action==='tab'){tab=button.dataset.tab;error='';render();if(tab==='chat')await loadMessages(true);if(tab==='orgs')await loadOrgs();}
       else if(action==='copy-code'){try{await navigator.clipboard.writeText(user.code);toast('フレンドコードをコピーしました。');}catch{toast(`フレンドコード: ${user.code}`);}}
-      else if(action==='edit-profile'){profileEditing=!profileEditing;render();}
-      else if(action==='cancel-profile'){profileEditing=false;render();}
+      else if(action==='edit-profile'){close();profiles().open({edit:true});}
+      else if(action==='view-profile'){const id=button.dataset.user;close();await profiles().view(id);}
       else if(action==='clear-error'){error='';render();}
       else if(action==='friend-request'){await api('/friends/request',{method:'POST',data:{code:button.dataset.code}});await refreshState({redraw:true});toast('フレンド申請を送りました。');}
       else if(action==='friend-accept'||action==='friend-reject'){await api('/friends/respond',{method:'POST',data:{requestId:button.dataset.request,accept:action==='friend-accept'}});await refreshState({redraw:true});}
@@ -296,8 +298,23 @@ export function initSocial({openPanel,toast=()=>{},icon,escapeHTML,baseUrl='http
   }
   function toggleMute(){if(!voice.stream)return;voice.muted=!voice.muted;for(const t of voice.stream.getAudioTracks())t.enabled=!voice.muted;updateVoiceUI();}
   async function resumeAudio(){let blocked=false;for(const {audio} of voice.peers.values())try{await audio.play();}catch{blocked=true;}voice.audioBlocked=blocked;updateVoiceUI();}
+  function onProfileChange(event){
+    const next=event.detail;if(!next?.verified||next.syncing)return;
+    const nextId=next.signedIn?next.id:null;
+    if((user?.id||null)!==nextId){
+      generation++;authenticated=!!nextId;user=nextId?{...next}:null;state={user,friends:{incoming:[],outgoing:[],accepted:[]},organizations:[],blocks:[]};
+      messages=[];since=0;channel='global';drafts.clear();searchResults=null;orgs=[];orgDetail=null;orgMembers=[];menuMessage=null;reportMessage=null;loadingChannel=false;
+      void leaveVoice(false);if(isVisible()){render();if(nextId)void connect();}return;
+    }
+    if(nextId&&Number(next.version)>=Number(user?.version||0)){
+      user={...user,...next};state.user=user;messages=messages.map(message=>message.user.id===nextId?{...message,user:{...message.user,name:next.name,title:next.title,accent:next.accent,avatarIcon:next.avatarIcon}}:message);
+      voice.members=voice.members.map(member=>member.id===nextId?{...member,name:next.name,title:next.title,accent:next.accent,avatarIcon:next.avatarIcon}:member);
+      if(isVisible())render(true);
+    }
+  }
   dock.addEventListener('click',event=>{const action=event.target.closest('[data-voice-action]')?.dataset.voiceAction;if(action==='mute')toggleMute();if(action==='leave')void leaveVoice();if(action==='open'){tab='voice';open();}});
-  window.addEventListener('pagehide',()=>{close();void leaveVoice(false,true);});
+  const onPageHide=()=>{close();void leaveVoice(false,true);};
+  window.addEventListener('pagehide',onPageHide);window.addEventListener('machi:profile-change',onProfileChange);
   let lastVisibilityCheck=0;
-  return{open,close,update(){const now=performance.now();if(now-lastVisibilityCheck<500)return;lastVisibilityCheck=now;if(visible&&!isVisible())close();}};
+  return{open,close,dispose(){close();void leaveVoice(false,true);ownedProfile?.dispose();window.removeEventListener('pagehide',onPageHide);window.removeEventListener('machi:profile-change',onProfileChange);audioContainer.remove();dock.remove();},update(){const now=performance.now();if(now-lastVisibilityCheck<500)return;lastVisibilityCheck=now;if(visible&&!isVisible())close();}};
 }

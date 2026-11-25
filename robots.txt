@@ -1,5 +1,6 @@
 User-agent: *
 Allow: /
-Disallow: /world/server/
+Disallow: /api/
+Disallow: /server/
 
-Sitemap: https://uni-tadayasu.github.io/world/sitemap.xml
+Sitemap: https://machi-life.hisa-0128-1996.chatgpt.site/sitemap.xml

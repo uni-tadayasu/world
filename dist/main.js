@@ -6,6 +6,13 @@ import {createAvatar} from './avatar.js';
 import {createGamepadManager} from './gamepad.js';
 import {loadCharacterModel} from './model-loader.js';
 import {saveCharacter,loadCharacter,deleteCharacter} from './persistence.js';
+import {createProfile,profileIconMarkup} from './profile.js';
+import {mountAddressSearch} from './address-search.js';
+import {createMusic,MUSIC_TRACKS} from './music.js';
+import {installInteractionGuard} from './interaction-guard.js';
+
+installInteractionGuard();
+const enhancements=document.createElement('link');enhancements.rel='stylesheet';enhancements.href=new URL('./enhancements.css',import.meta.url).href;document.head.append(enhancements);
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -28,8 +35,42 @@ const poseTemp=new THREE.Vector3(),targetCamera=new THREE.Vector3(),lookAt=new T
 const buildingIcons={home:'home',cafe:'coffee',market:'bag',office:'work',gallery:'art',bookstore:'book',park:'leaf'};
 const descriptions={home:'料理をして、くつろいで、眠る。',cafe:'淹れたての一杯と、ちいさな仕事。',market:'今日のごはんを、ここで。',office:'働いて、この街での暮らしを育てる。',gallery:'気ままにアートを楽しむ。',bookstore:'次の一冊に出会う。',park:'緑のなかで、ひと休み。'};
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
+let addressSearch=null,locationRequest=0,lastRequestedLocation=null,avatarHeadHeight=1.95;
+let selectedWorldRadius=matchMedia('(pointer:coarse)').matches?150:250;
+const nameplatePoint=new THREE.Vector3();
+const profile=createProfile({openPanel:(t,e,h)=>showPanel(t,e,h,'profile',true),toast,onChange:updateProfileUI});
+const music=createMusic({toast,onChange:updateMusicUI});
+
+function updateProfileUI(state){
+  if($('nameplate-name'))$('nameplate-name').textContent=state.name||'あなた';
+  if($('nameplate-title')){$('nameplate-title').textContent=state.title??'街の住人';$('nameplate-title').hidden=state.title==='';}
+  if($('nameplate-icon'))$('nameplate-icon').innerHTML=profileIconMarkup(state.avatarIcon,18);
+  $('player-nameplate')?.style.setProperty('--profile-accent',state.accent||'#789dff');
+  if(!state.showName&&$('player-nameplate'))$('player-nameplate').hidden=true;
+}
+function updateNameplate(){
+  const element=$('player-nameplate');if(!element)return;
+  if(!started||!camera||!avatar||view==='first'||modalType||busy||!profile.getState().showName){element.hidden=true;return;}
+  nameplatePoint.set(pos.x,activeGround()+jumpY+avatarHeadHeight+.24,pos.z).project(camera);
+  element.hidden=nameplatePoint.z<-1||nameplatePoint.z>1||Math.abs(nameplatePoint.x)>.96||Math.abs(nameplatePoint.y)>.93;
+  if(!element.hidden){element.style.left=(nameplatePoint.x*.5+.5)*innerWidth+'px';element.style.top=(-nameplatePoint.y*.5+.5)*innerHeight+'px';}
+}
+function measureAvatar(){if(!avatar)return;avatar.group.updateMatrixWorld(true);const box=new THREE.Box3().setFromObject(avatar.group);avatarHeadHeight=Number.isFinite(box.max.y)?THREE.MathUtils.clamp(box.max.y-avatar.group.position.y,1,3.5):1.95;}
+function updateMusicUI(state){
+  if($('music-status'))$('music-status').textContent=state.error||(state.loading?'BGMを読み込んでいます…':!state.enabled?'BGMはオフです':state.playing?`${state.track.label}のBGM ${state.track.source} を再生中`:'街に入ると、今の時刻に合ったBGMが始まります');
+  if($('music-volume-label'))$('music-volume-label').textContent=Math.round(state.volume*100)+'%';
+  if($('music-toggle'))$('music-toggle').checked=state.enabled;
+  document.querySelectorAll('[data-music-period]').forEach(el=>el.classList.toggle('current',el.dataset.musicPeriod===state.period));
+  if($('sound-toggle')){$('sound-toggle').innerHTML=icon(state.enabled||life.state.settings.sound?'music':'soundOff');$('sound-toggle').setAttribute('aria-label','音楽・環境音');}
+}
+function graphicsUnavailable(){showPanel('3D描画を開始できませんでした','GRAPHICS',`<p>ブラウザのハードウェアアクセラレーションを有効にして再読み込みしてください。対応する別のブラウザで開くこともできます。</p><p>プロフィールやオンライン機能、音楽の設定はこの画面から使えます。</p><div class="button-row"><button class="primary-btn" data-cmd="reload">再読み込み</button><button class="secondary-btn" data-panel="menu">メニューを開く</button></div>`);}
+
 
 async function boot(){
+  setupUI();updateProfileUI(profile.getState());void profile.sync();music.update(life.state.minutes);
+  window.addEventListener('pagehide',()=>{saveGame();audio.stop();music.stop();});
+  document.addEventListener('visibilitychange',()=>{keys.clear();touch.x=touch.y=0;velocity.x=velocity.z=0;if(document.hidden){saveGame();audio.stop();}else{life.syncClock();music.update(life.state.minutes);lastFrame=performance.now();if(life.state.settings.sound&&started)audio.start();}});
+  document.addEventListener('pointerdown',()=>music.unlock(),{once:true});
   try{
     $('load-progress').style.width='25%';
     renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance',alpha:false});
@@ -48,60 +89,78 @@ async function boot(){
     pos={x:world.spawn.x,z:world.spawn.z};outdoorPose={...world.spawn};yaw=world.spawn.yaw;
     avatar.group.position.set(pos.x,.14,pos.z);playerYaw=0;
     updateCamera(1,true);applyQuality(life.state.settings.quality);
-    setupControls();setupUI();updateHUD();drawMap($('minimap'));initPossessions();
+    measureAvatar();setupControls();updateHUD();drawMap($('minimap'));initPossessions();
     renderer.domElement.addEventListener('webglcontextlost',e=>{e.preventDefault();busy=true;showPanel('描画を一時停止しました','GRAPHICS',`<p>端末の描画機能が一時停止しました。保存済みの暮らしは保持されています。</p><button class="primary-btn" data-cmd="reload">再読み込み</button>`);});
     window.addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();});
-    window.addEventListener('pagehide',()=>{saveGame();audio.stop();});
-    document.addEventListener('visibilitychange',()=>{keys.clear();touch.x=touch.y=0;velocity.x=velocity.z=0;if(document.hidden){saveGame();audio.stop();}else{lastFrame=performance.now();if(life.state.settings.sound&&started)audio.start();}});
     $('load-progress').style.width='100%';$('load-label').textContent='あなたの一日が、はじまります';
     setTimeout(()=>$('loading').classList.add('finished'),200);setTimeout(()=>$('loading').hidden=true,700);
-    requestAnimationFrame(frame);
     restoreCharacter();
-  }catch(error){console.error(error);$('load-label').textContent='3D画面を開始できませんでした。ブラウザのハードウェアアクセラレーションを有効にして、再読み込みしてください。';$('loading').insertAdjacentHTML('beforeend','<button class="primary-btn" onclick="location.reload()">再読み込み</button>');}
+  }catch(error){
+    console.error(error);renderer?.dispose();renderer=null;document.body.classList.add('graphics-unavailable');
+    $('loading').hidden=true;$('load-label').textContent='3D描画を開始できませんでした';
+    toast('3D描画を開始できませんでした。プロフィールやオンライン機能はメニューから使えます。');
+  }
+  requestAnimationFrame(frame);
 }
 
-function saveGame(){if(!world)return;if(!activeBuilding&&!world.real){outdoorPose={x:pos.x,z:pos.z,yaw};}life.state.position={...outdoorPose};life.state.location=activeBuilding?active.label:(world.real?'現在地の街':'ひかり町');return life.save();}
-function startGame(){started=true;closeModal();$('intro').hidden=true;$('hud').hidden=false;document.body.classList.add('playing');$('start').textContent='暮らしを続ける';renderer.domElement.focus();if(life.state.settings.sound)audio.start();updateHUD();}
-function startDemo(){if(activeBuilding){active.group.visible=false;activeBuilding=null;}if(world.real){scene.remove(world.group);world.dispose?.();world=createWorld(THREE);scene.add(world.group);}world.group.visible=true;active=world;activeBuilding=null;exteriorReal=false;const saved=life.state.position;pos={x:world.spawn.x,z:world.spawn.z};if(saved&&Number.isFinite(saved.x)&&!collides(saved.x,saved.z)){pos={x:saved.x,z:saved.z};}yaw=0;pitch=.28;selectedDestination=null;scene.fog.density=.0031;possessions?.attachWorld(world,(x,z,r)=>collides(x,z,r));if(possessions)possessions.group.visible=true;startGame();toast('ひかり町は、生活を体験するための架空の街です。');updateCamera(1,true);}
+function saveGame(){if(!world)return life.save();if(!activeBuilding&&!world.real){outdoorPose={x:pos.x,z:pos.z,yaw};}life.state.position={...outdoorPose};life.state.location=activeBuilding?active.label:(world.real?'現在地の街':'ひかり町');return life.save();}
+function startGame(){if(!renderer||!world){graphicsUnavailable();return;}started=true;closeModal(false);$('intro').hidden=true;$('hud').hidden=false;document.body.classList.add('playing');$('start').textContent='暮らしを続ける';renderer.domElement.focus();if(life.state.settings.sound)audio.start();life.syncClock();music.start(life.state.minutes);updateHUD();}
+function startDemo(){if(!renderer||!world){graphicsUnavailable();return;}if(activeBuilding){active.group.visible=false;activeBuilding=null;}if(world.real){scene.remove(world.group);world.dispose?.();world=createWorld(THREE);scene.add(world.group);}world.group.visible=true;active=world;activeBuilding=null;exteriorReal=false;const saved=life.state.position;pos={x:world.spawn.x,z:world.spawn.z};if(saved&&Number.isFinite(saved.x)&&!collides(saved.x,saved.z)){pos={x:saved.x,z:saved.z};}yaw=0;pitch=.28;selectedDestination=null;scene.fog.density=.0031;possessions?.attachWorld(world,(x,z,r)=>collides(x,z,r));if(possessions)possessions.group.visible=true;applyQuality(life.state.settings.quality);startGame();toast('ひかり町は、生活を体験するための架空の街です。');updateCamera(1,true);}
 function showPanel(title,eyebrow,html,type='custom',wide=false){
   if(modalType==='social'&&type!=='social')social?.close?.();
+  if(modalType==='profile'&&type!=='profile')profile?.close?.();
+  addressSearch?.dispose();addressSearch=null;locationRequest++;
+  if($('player-nameplate'))$('player-nameplate').hidden=true;
   keys.clear();touch.x=touch.y=0;velocity.x=velocity.z=0;previousFocus=document.activeElement;
   modalType=type;$('modal-title').textContent=title;$('modal-eyebrow').textContent=eyebrow;$('modal-body').innerHTML=html;$('modal').classList.toggle('wide',wide);$('modal-layer').hidden=false;
   setTimeout(()=>$('close-modal').focus(),20);return $('modal-body');
 }
-function closeModal(){if(modalType==='social')social?.close?.();modalType='';$('modal-layer').hidden=true;keys.clear();touch.x=touch.y=0;$('joystick-knob').style.transform='';if(started)renderer?.domElement.focus();else previousFocus?.focus?.();}
+function closeModal(cancelLoading=true){if(cancelLoading&&modalType==='geo-loading')geoController?.abort();if(modalType==='social')social?.close?.();if(modalType==='profile')profile?.close?.();addressSearch?.dispose();addressSearch=null;locationRequest++;modalType='';$('modal-layer').hidden=true;keys.clear();touch.x=touch.y=0;$('joystick-knob').style.transform='';if(started)renderer?.domElement.focus();else previousFocus?.focus?.();}
 
-function openLocation(){showPanel('今いる場所から、はじめる','THE REAL WORLD',`<p>端末の位置情報を使い、現在地を中心に半径約450mの道路・建物・地形を読み込みます。歩いてエリアの端へ近づくと、次のエリアを読み込みます。</p><div class="notice">位置情報を許可すると、周辺地図の取得のため緯度・経度が地図・標高データ提供元へ送られます。位置座標をほかのプレイヤーへ自動共有することはありません。</div><button class="primary-btn" data-cmd="locate">${icon('pin')} 現在地を取得して始める</button><p class="section-label">位置情報を使えないとき</p><p>任意の緯度・経度も指定できます。入力地点は現在地として扱いません。</p><div class="form-field"><input id="latitude-input" type="number" step="any" min="-85" max="85" placeholder="緯度 例 35.6812" aria-label="緯度"><input id="longitude-input" type="number" step="any" min="-180" max="180" placeholder="経度 例 139.7671" aria-label="経度"></div><div class="button-row"><button class="secondary-btn" data-cmd="coordinates">この座標を読み込む</button><button class="secondary-btn" data-cmd="demo">架空のひかり町で体験する</button></div><div class="notice">道路・建物の配置は実地図データに基づきます。記録のない高さ、建物の外観・室内、人物はゲーム用の表現です。写真のような現実世界の完全再現ではありません。標高は近似データです。</div><p class="legal-note"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">地図データ © OpenStreetMap contributors / ODbL</a> · <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">地形 © Mapzen / 各標高データ提供元</a></p>`,'location');}
-async function locate(){
-  if(!navigator.geolocation){toast('このブラウザは位置情報に対応していません。座標指定で開始できます。');return;}
-  const b=$('modal-body').querySelector('[data-cmd="locate"]');if(b){b.disabled=true;b.textContent='端末の位置情報を確認しています…';}
-  navigator.geolocation.getCurrentPosition(p=>loadReal(p.coords.latitude,p.coords.longitude,{accuracy:p.coords.accuracy}),e=>{if(b){b.disabled=false;b.textContent='現在地を取得して始める';}toast(e.code===1?'位置情報が許可されませんでした。ブラウザの位置情報設定を確認するか、座標を指定してください。':e.code===3?'位置情報の取得が時間切れになりました。もう一度お試しください。':'現在地を取得できませんでした。座標を指定して始めることもできます。');},{enableHighAccuracy:true,timeout:18000,maximumAge:60000});
+function openLocation(){
+  showPanel(started?'次の街へ、出かける':'あなたの街から、はじめる','THE REAL WORLD',`<p>住所・地名を検索するか、端末の現在地から道路・建物を読み込みます。</p><div id="address-host"></div><div class="location-divider"><span>端末の現在地を使う</span></div><button class="primary-btn location-gps" data-cmd="locate">${icon('pin')} ${started?'現在地の街へ移動する':'現在地からはじめる'}</button><div class="form-row"><label for="world-radius">読み込む範囲<small>最初は狭い範囲から読み込むと安定します</small></label><select id="world-radius">${[[150,'半径150m · すばやく'],[250,'半径250m · 標準'],[450,'半径450m · 広い範囲']].map(([v,t])=>`<option value="${v}" ${selectedWorldRadius===v?'selected':''}>${t}</option>`).join('')}</select></div><p class="location-privacy">位置情報は許可したときだけ取得します。緯度・経度を、このサイトの地図中継を通じて地図・標高の提供元へ送信します。ほかのプレイヤーへ座標を自動共有することはありません。</p><details class="coordinate-details"><summary>緯度・経度で指定する</summary><p>住所が見つからない場合は、任意の座標も使えます。</p><div class="form-field"><input id="latitude-input" type="number" step="any" min="-85" max="85" placeholder="緯度 例 35.6812" aria-label="緯度"><input id="longitude-input" type="number" step="any" min="-180" max="180" placeholder="経度 例 139.7671" aria-label="経度"></div><button class="secondary-btn" data-cmd="coordinates">この座標を読み込む</button></details><div class="notice">道路・建物の位置は実地図に基づきます。外観・室内・記録のない高さはゲーム用の表現です。街の人や車は時刻に応じたシミュレーションで、現実の人や車の現在位置ではありません。</div><div class="button-row"><button class="secondary-btn" data-cmd="demo">架空のひかり町で体験する</button></div><p class="legal-note"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">地図 © OpenStreetMap contributors / ODbL</a> · <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">地形 © Mapzen / 各標高データ提供元</a></p>`,'location');
+  addressSearch=mountAddressSearch($('address-host'),{started,onSelect:place=>loadReal(place.latitude,place.longitude,{placeName:place.title,radius:selectedWorldRadius})});
 }
-async function loadReal(latitude,longitude,{accuracy=null,stream=false}={}){
+async function locate(){
+  if(!navigator.geolocation){toast('このブラウザは位置情報に対応していません。住所か座標を指定してください。');return;}
+  const request=++locationRequest,b=$('modal-body').querySelector('[data-cmd="locate"]');if(b){b.disabled=true;b.textContent='端末の位置情報を確認しています…';}
+  navigator.geolocation.getCurrentPosition(p=>{if(request!==locationRequest||modalType!=='location')return;loadReal(p.coords.latitude,p.coords.longitude,{accuracy:p.coords.accuracy,radius:selectedWorldRadius});},e=>{if(request!==locationRequest)return;if(b){b.disabled=false;b.textContent='現在地からはじめる';}toast(e.code===1?'位置情報が許可されませんでした。住所や座標を指定して開始できます。':e.code===3?'位置情報の取得が時間切れになりました。住所や座標を指定するか、再度お試しください。':'現在地を取得できませんでした。住所や座標を指定してください。');},{enableHighAccuracy:false,timeout:15000,maximumAge:60000});
+}
+async function loadReal(latitude,longitude,{accuracy=null,stream=false,radius=selectedWorldRadius,placeName=''}={}){
+  if(!renderer||!world){graphicsUnavailable();return;}
   if(!Number.isFinite(latitude)||!Number.isFinite(longitude)||Math.abs(latitude)>85||Math.abs(longitude)>180){toast('緯度は−85〜85、経度は−180〜180で入力してください。');return;}
-  if(streaming)return;streaming=true;busy=true;geoController=new AbortController();
-  if(!stream)showPanel('現在地の街を読み込んでいます','LOADING YOUR WORLD',`<p id="geo-progress">標高と地図を取得しています…</p><div class="notice">初回は数十秒かかる場合があります。画像やキャラクターファイルは送信されません。</div><button class="secondary-btn" data-cmd="cancel-geo">キャンセル</button>`,'geo-loading');
+  radius=[150,250,450].includes(Number(radius))?Number(radius):250;
+  if(streaming)return;streaming=true;busy=true;const controller=new AbortController();geoController=controller;
+  lastRequestedLocation={latitude,longitude,accuracy,radius,placeName};
+  if(!stream)showPanel('街の地図を読み込んでいます','LOADING YOUR WORLD',`<p id="geo-progress">道路・建物と標高を同時に取得しています…</p><div class="geo-loading-line"><span></span></div><p class="location-privacy">半径${radius}mを取得します。配信元が応答しない場合は、別の配信元を試します。</p><button class="secondary-btn" data-cmd="cancel-geo">キャンセル</button>`,'geo-loading');
   try{
     const [{createRealWorld},{loadTerrain}]=await Promise.all([import('./realworld.js'),import('./terrain.js')]);
-    let terrain=null,terrainWarning='';
-    try{terrain=await loadTerrain({latitude,longitude,radius:450,signal:geoController.signal,onProgress:v=>{if($('geo-progress'))$('geo-progress').textContent=v.message||'地形を読み込んでいます';}});}catch(e){if(geoController.signal.aborted)throw e;terrainWarning='標高データを取得できなかったため、地形は平面で表示しています。';}
-    const next=await createRealWorld(THREE,{latitude,longitude,radius:450,terrain,signal:geoController.signal,onProgress:v=>{if($('geo-progress'))$('geo-progress').textContent=typeof v==='string'?v:v.message||'道路と建物を読み込んでいます';}});
-    if(geoController.signal.aborted){next.dispose?.();throw new Error('中止しました');}
+    let terrainWarning='';
+    const terrainPromise=loadTerrain({latitude,longitude,radius,signal:controller.signal}).catch(e=>{if(controller.signal.aborted)throw e;terrainWarning='標高データを取得できなかったため、地形は平面で表示しています。';return null;});
+    // Start roads and buildings immediately; elevation is fetched concurrently.
+    terrainPromise.catch(()=>{});
+    const next=await createRealWorld(THREE,{latitude,longitude,radius,terrainPromise,signal:controller.signal,onProgress:v=>{if($('geo-progress'))$('geo-progress').textContent=typeof v==='string'?v:v.message||'道路と建物を読み込んでいます';}});
+    if(controller.signal.aborted){next.dispose?.();throw new DOMException('読み込みを中止しました','AbortError');}
     if(activeBuilding){active.group.visible=false;activeBuilding=null;}
-    scene.remove(world.group);if(world.real)world.dispose?.();else disposeGroup(world.group);world=next;active=world;scene.add(world.group);world.group.visible=true;pos={x:world.spawn.x,z:world.spawn.z};yaw=stream?yaw:world.spawn.yaw||0;pitch=.28;selectedDestination=null;exteriorReal=true;scene.fog.density=.0018;scene.fog.color.set('#bdd6db');
-    if(!stream)realLocationName=accuracy!==null?'現在地の街':'指定地点の街';
+    scene.remove(world.group);if(world.dispose)world.dispose();else disposeGroup(world.group);
+    world=next;active=world;scene.add(world.group);world.group.visible=true;pos={x:world.spawn.x,z:world.spawn.z};outdoorPose={...pos,yaw};yaw=stream?yaw:world.spawn.yaw||0;pitch=.28;selectedDestination=null;exteriorReal=true;scene.fog.density=.0018;
+    if(!stream)realLocationName=placeName||(accuracy!==null?'現在地の街':'指定地点の街');
     possessions?.attachWorld(world,(x,z,r)=>collides(x,z,r));if(possessions)possessions.group.visible=true;
-    startGame();updateCamera(1,true);$('location-label').textContent=realLocationName;
+    applyQuality(life.state.settings.quality);if(!stream)startGame();else updateHUD();updateCamera(1,true);$('location-label').textContent=realLocationName;
     if(terrainWarning)toast(terrainWarning);
     if(accuracy!==null)toast(`現在地を読み込みました（端末の測位精度：約${Math.round(accuracy)}m）。`);
-    else if(!stream)toast('指定された座標の街を読み込みました。');
+    else if(!stream)toast(`${placeName||'指定した地点'}の街を読み込みました。`);
     if(world.sourceInfo?.note)toast(world.sourceInfo.note);
     lastStream=performance.now();
-  }catch(e){console.warn(e);if(!geoController?.signal.aborted){toast('地図を読み込めませんでした。通信環境を確認して再度お試しください。');if(!stream)showPanel('現在地の読み込みに失敗しました','WORLD CONNECTION',`<p>${esc(e.message)}</p><p>現在地とは異なる架空の街へ自動的に切り替えることはありません。</p><div class="button-row"><button class="primary-btn" data-cmd="location">もう一度、場所を指定する</button><button class="secondary-btn" data-cmd="demo">ひかり町で体験する</button></div>`,'location-error');}}
-  finally{busy=false;streaming=false;geoController=null;}
+  }catch(e){
+    console.warn(e);if(!controller.signal.aborted){
+      if(stream)toast('次のエリアを取得できませんでした。現在の街を表示しています。');
+      else showPanel('地図の配信元に接続できませんでした','WORLD CONNECTION',`<p>${esc(e.message)}</p><p>同じ地点を半径150mで再試行できます。位置情報を取り直す必要はありません。</p><div class="button-row"><button class="primary-btn" data-cmd="retry-geo-small">同じ地点を150mで再試行</button><button class="secondary-btn" data-cmd="location">住所・場所を選び直す</button><button class="secondary-btn" data-cmd="demo">ひかり町で体験する</button></div>`,'location-error');
+    }
+  }finally{busy=false;streaming=false;geoController=null;lastStream=performance.now();}
 }
 
-function activeGround(x=pos.x,z=pos.z){return activeBuilding?0:(world.terrainHeight?world.terrainHeight(x,z):.14);}
+function activeGround(x=pos.x,z=pos.z){return activeBuilding?0:(world?.terrainHeight?world.terrainHeight(x,z):.14);}
 function pointInPolygon(x,z,p){let inside=false;for(let i=0,j=p.length-1;i<p.length;j=i++){const a=p[i],b=p[j];const ax=a.x??a[0],az=a.z??a[1],bx=b.x??b[0],bz=b.z??b[1];if((az>z)!==(bz>z)&&x<(bx-ax)*(z-az)/(bz-az)+ax)inside=!inside;}return inside;}
 function collides(x,z,r=.33){
   const b=active.bounds;if(x<b.minX+r||x>b.maxX-r||z<b.minZ+r||z>b.maxZ-r)return true;
@@ -123,11 +182,12 @@ function updateCamera(dt,instant=false){
   if(instant)camera.position.copy(targetCamera);else camera.position.lerp(targetCamera,1-Math.exp(-dt*12));
   lookAt.set(pos.x,ground+1.25+jumpY*.8,pos.z);camera.lookAt(lookAt);
 }
-function setView(){view=view==='third'?'first':'third';pitch=view==='first'?.22:.28;toast(view==='third'?'三人称視点：キャラクターを後ろから見ます。':'一人称視点：キャラクターの目線で歩きます。');updateCamera(1,true);}
+function setView(){if(!renderer||!world)return;view=view==='third'?'first':'third';pitch=view==='first'?.22:.28;toast(view==='third'?'三人称視点：キャラクターを後ろから見ます。':'一人称視点：キャラクターの目線で歩きます。');updateCamera(1,true);}
 
 function frame(now){
   requestAnimationFrame(frame);const dt=Math.min((now-lastFrame)/1000,.05);lastFrame=now;if(document.hidden)return;
-  social?.update?.();
+  life.syncClock();music.update(life.state.minutes);social?.update?.();
+  if(!renderer){if(now-lastUI>1000){updateHUD();lastUI=now;}return;}
   const pad=gamepad.update();handleGamepadMenu(pad,now);
   const playing=started&&!modalType&&!busy;
   let moving=false,running=false;
@@ -144,12 +204,12 @@ function frame(now){
     if(moving){const target=Math.atan2(-(pos.x-beforeX),-(pos.z-beforeZ));playerYaw+=Math.atan2(Math.sin(target-playerYaw),Math.cos(target-playerYaw))*Math.min(1,dt*13);walkTime+=dt*(running?2:1);if(walkTime>.46){walkTime=0;if(jumpY<.02)audio.step();}}
     if(pad.jump)doJump();if(pad.interact)interact();if(pad.map)openPanel('map');if(pad.view)setView();if(pad.pause)openPanel('pause');
     const walkedBefore=life.state.stats.steps;life.tick(dt,moving,running);life.state.stats.steps=walkedBefore+Math.hypot(pos.x-beforeX,pos.z-beforeZ);
-    if(!activeBuilding&&world.real&&!streaming&&Math.max(Math.abs(pos.x),Math.abs(pos.z))>320&&now-lastStream>60000){const g=world.toGeo(pos.x,pos.z);loadReal(g.latitude??g.lat,g.longitude??g.lon,{stream:true});lastStream=now;}
+    if(!activeBuilding&&world.real&&!streaming&&Math.max(Math.abs(pos.x),Math.abs(pos.z))>(world.radius||250)*.72&&now-lastStream>30000){const g=world.toGeo(pos.x,pos.z);loadReal(g.latitude??g.lat,g.longitude??g.lon,{stream:true,radius:world.radius||selectedWorldRadius});lastStream=now;}
   }
   if(jumpY>0||jumpV>0){jumpV-=10.5*dt;jumpY=Math.max(0,jumpY+jumpV*dt);if(jumpY===0)jumpV=0;}
   avatar.group.position.set(pos.x,activeGround()+jumpY,pos.z);avatar.group.rotation.y=playerYaw;avatar.update(dt,{moving,running,jumping:jumpY>.04,speed:Math.hypot(velocity.x,velocity.z)});
-  if(!document.hidden)world.update?.(dt,life.state.minutes/60);
-  updateCamera(dt);updateLighting();
+  if(!document.hidden)world.update?.(dt,life.state.minutes/60,pos);
+  updateCamera(dt);updateLighting();updateNameplate();
   if(now-lastUI>200){updateHUD();updateNearest();if(modalType==='controller')updateControllerReadout();lastUI=now;}
   if(now-lastMap>160){drawMap($('minimap'));lastMap=now;}
   renderer.render(scene,camera);
@@ -176,23 +236,23 @@ async function enterBuilding(it){
   busy=true;outdoorPose={x:pos.x,z:pos.z,yaw};const b=world.buildings.find(b=>b.id===it.buildingId);const id=it.interiorId||b?.interiorId||b?.type||it.buildingId;
   const known=['home','cafe','market','office','gallery','bookstore'];const interiorId=known.includes(id)?id:'home';
   $('transition-label').textContent=b?.name||it.title;$('transition').classList.add('active');await wait(260);
-  world.group.visible=false;if(possessions)possessions.group.visible=false;if(!interiorCache.has(interiorId)){let room;if(interiorId==='home'){try{const {createPlayerHome}=await import('./housing.js');room=await createPlayerHome(THREE,{toast,openPanel:(t,e,h)=>showPanel(t,e,h,'craft',true)});}catch(e){toast('クラフト用の部屋を読み込めませんでした。標準の部屋を開きます。');room=createInterior(THREE,interiorId);}}else room=createInterior(THREE,interiorId);interiorCache.set(interiorId,room);scene.add(room.group);room.group.visible=false;}
+  world.group.visible=false;if(possessions)possessions.group.visible=false;if(!interiorCache.has(interiorId)){let room;if(interiorId==='home'){try{const {createPlayerHome}=await import('./housing.js');room=await createPlayerHome(THREE,{toast,openPanel:(t,e,h)=>showPanel(t,e,h,'craft',true)});}catch(e){toast('クラフト用の部屋を読み込めませんでした。標準の部屋を開きます。');room=createInterior(THREE,interiorId);}}else room=createInterior(THREE,interiorId);interiorCache.set(interiorId,room);scene.add(room.group);room.setQuality?.(life.state.settings.quality);room.group.visible=false;}
   active=interiorCache.get(interiorId);active.group.visible=true;activeBuilding={id:it.buildingId,type:interiorId,name:b?.name||active.label};pos={x:active.spawn.x,z:active.spawn.z};yaw=active.spawn.yaw;playerYaw=yaw;pitch=.24;velocity.x=velocity.z=0;life.visit(interiorId);life.state.location=active.label;saveGame();updateCamera(1,true);updateHUD();
   if(world.real)toast('室内はゲーム用の共通内装です。実際の建物内部とは異なります。');
   await wait(100);$('transition').classList.remove('active');busy=false;
 }
 async function leaveBuilding(){busy=true;$('transition-label').textContent=world.real?'街へ戻る':'ひかり町';$('transition').classList.add('active');await wait(260);active.group.visible=false;active=world;world.group.visible=true;activeBuilding=null;if(possessions)possessions.group.visible=true;pos={x:outdoorPose.x,z:outdoorPose.z};yaw=outdoorPose.yaw+Math.PI;playerYaw=yaw;pitch=.28;velocity.x=velocity.z=0;updateCamera(1,true);saveGame();updateHUD();await wait(100);$('transition').classList.remove('active');busy=false;}
 
-function openActivities(station,title,subtitle){const acts=life.getActions(station);showPanel(title||'ひと息つく','EVERYDAY MOMENTS',`<p>${esc(subtitle||'今日は、何をして過ごしましょう。')}</p><div class="action-list">${acts.map(a=>`<button class="action-card" data-action="${esc(a.id)}" ${a.disabled?'disabled':''}><span class="action-icon">${icon(a.icon)}</span><span><strong>${esc(a.label)}</strong><small>${esc(a.reason||a.description)}</small></span><span class="action-meta ${a.reward?'positive':''}">${a.cost?'¥'+a.cost.toLocaleString('ja-JP'):a.reward?'+¥'+a.reward.toLocaleString('ja-JP'):'無料'}<small>${a.minutes}分</small></span></button>`).join('')}</div>`,'activity');}
+function openActivities(station,title,subtitle){const acts=life.getActions(station);showPanel(title||'ひと息つく','EVERYDAY MOMENTS',`<p>${esc(subtitle||'今日は、何をして過ごしましょう。')}</p><div class="action-list">${acts.map(a=>`<button class="action-card" data-action="${esc(a.id)}" ${a.disabled?'disabled':''}><span class="action-icon">${icon(a.icon)}</span><span><strong>${esc(a.label)}</strong><small>${esc(a.reason||a.description)}</small></span><span class="action-meta ${a.reward?'positive':''}">${a.cost?'¥'+a.cost.toLocaleString('ja-JP'):a.reward?'+¥'+a.reward.toLocaleString('ja-JP'):'無料'}</span></button>`).join('')}</div>`,'activity');}
 async function performAction(id){const result=life.perform(id);if(!result.ok){toast(result.message);return;}closeModal();busy=true;$('transition-label').textContent=result.message;$('transition').classList.add('active');gamepad.vibrate?.({duration:60,strongMagnitude:.15,weakMagnitude:.3});await wait(700);$('transition').classList.remove('active');busy=false;updateHUD();saveGame();}
 
 function updateHUD(){if(!life)return;$('clock').textContent=life.formatTime();$('day').textContent=life.getDayLabel();$('money').textContent='¥'+Math.floor(life.state.money).toLocaleString('ja-JP');$('weather-icon').innerHTML=icon(life.state.minutes>=360&&life.state.minutes<1080?'sun':'moon');
-  $('location-label').textContent=activeBuilding?activeBuilding.name:(started?(world.real?realLocationName:'ひかり町'):'ひかり町 · プレビュー');
+  $('location-label').textContent=activeBuilding?activeBuilding.name:(started?(world?.real?realLocationName:'ひかり町'):'ひかり町 · プレビュー');
   for(const key of ['hunger','energy','mood']){$(`${key}-value`).textContent=Math.round(life.state[key]);$(`${key}-bar`).style.width=life.state[key]+'%';}
   const goals=life.getGoals(),done=goals.filter(g=>g.completed||g.done).length,next=goals.find(g=>!g.done&&!g.completed);$('goal-label').textContent=next?.title||'あなたらしい一日を、楽しもう';$('goal-counter').textContent=done+'/'+goals.length;
   const count=life.state.inventory.reduce((n,i)=>n+i.qty,0);$('bag-count').hidden=!count;$('bag-count').textContent=count;
   $('destination').hidden=!selectedDestination||!!activeBuilding;if(selectedDestination){$('destination-name').textContent=selectedDestination.name;$('destination-distance').textContent=Math.round(Math.hypot(selectedDestination.entrance.x-pos.x,selectedDestination.entrance.z-pos.z))+'m';}
-  $('sound-toggle').innerHTML=icon(life.state.settings.sound?'sound':'soundOff');
+  updateMusicUI(music.getState());if($('traffic-source'))$('traffic-source').textContent='街の人・車：シミュレーション';
   const attribution=$('attribution');if(attribution)attribution.hidden=!world?.real;
 }
 
@@ -208,23 +268,28 @@ function drawMap(canvas,big=false){if(!canvas||!world)return;const ctx=canvas.ge
 }
 
 function openPanel(type){
-  if(type==='map'){const list=world.buildings.filter(b=>b.entrance).slice().sort((a,b)=>Math.hypot(a.x-pos.x,a.z-pos.z)-Math.hypot(b.x-pos.x,b.z-pos.z)).slice(0,30);showPanel(world.real?'現在地の街':'ひかり町の地図','TAKE THE LONG WAY HOME',`<p>行き先を選ぶと、距離と目的地を表示します。キャラクターを動かして歩いていきましょう。</p><div class="map-layout"><canvas id="bigmap" class="bigmap" width="460" height="480"></canvas><div class="building-list">${list.map(b=>`<button class="building-button" data-destination="${esc(b.id)}"><span>${icon(buildingIcons[b.type]||'home')}</span><span><strong>${esc(b.name)}</strong><small>${esc(descriptions[b.type]||'地図に記録された建物')}</small></span><span class="distance">${Math.round(Math.hypot(b.entrance.x-pos.x,b.entrance.z-pos.z))}m</span></button>`).join('')}</div></div><div class="button-row"><button class="secondary-btn" data-cmd="location">${icon('globe',16)} 現在地・別の座標</button>${activeBuilding?'<button class="secondary-btn" data-cmd="exit">街へ出る</button>':''}</div>${world.real?'<p class="legal-note">建物の配置はOSM。外観・室内はゲーム用表現です。地形は取得できた標高データの近似です。</p>':''}`,'map',true);drawMap($('bigmap'),true);return;}
+  if(type==='profile'){profile.open();return;}
+  if(type==='audio'){renderAudio();return;}
+  if(type==='menu'){renderMenu();return;}
+  if(type==='map'&&!world){openLocation();return;}
+  if(type==='map'){const list=world.buildings.filter(b=>b.entrance).slice().sort((a,b)=>Math.hypot(a.x-pos.x,a.z-pos.z)-Math.hypot(b.x-pos.x,b.z-pos.z)).slice(0,30);showPanel(world.real?'現在地の街':'ひかり町の地図','TAKE THE LONG WAY HOME',`<p>行き先を選ぶと、距離と目的地を表示します。キャラクターを動かして歩いていきましょう。</p><div class="map-layout"><canvas id="bigmap" class="bigmap" width="460" height="480"></canvas><div class="building-list">${list.map(b=>`<button class="building-button" data-destination="${esc(b.id)}"><span>${icon(buildingIcons[b.type]||'home')}</span><span><strong>${esc(b.name)}</strong><small>${esc(descriptions[b.type]||'地図に記録された建物')}</small></span><span class="distance">${Math.round(Math.hypot(b.entrance.x-pos.x,b.entrance.z-pos.z))}m</span></button>`).join('')}</div></div><div class="button-row"><button class="secondary-btn" data-cmd="location">${icon('globe',16)} 住所・現在地から移動</button>${activeBuilding?'<button class="secondary-btn" data-cmd="exit">街へ出る</button>':''}</div>${world.real?'<p class="legal-note">建物の配置はOSM。外観・室内はゲーム用表現です。地形は取得できた標高データの近似です。</p>':''}`,'map',true);drawMap($('bigmap'),true);return;}
   if(type==='bag'){showPanel('いつもの持ち物','THINGS YOU CARRY',`<p>お店で買ったものを、好きなときに。食材は自宅のキッチンで使えます。</p>${life.state.inventory.length?`<div class="action-list">${life.state.inventory.map(i=>`<div class="action-card"><span class="action-icon">${icon(i.id==='book'?'book':i.id==='groceries'?'bag':i.id==='water'?'drop':'meal')}</span><span><strong>${esc(i.name)}</strong><small>${i.qty}個</small></span>${i.id==='groceries'?'<span class="action-meta"><small>自宅で調理</small></span>':`<button class="secondary-btn" style="margin-left:auto" data-action="${i.id==='book'?'read_book':'use:'+esc(i.id)}">${i.id==='book'?'読む':'使う'}</button>`}</div>`).join('')}</div>`:'<div class="empty-state">'+icon('bag',40)+'<p>まだ、持ち物はありません。<br>街のマーケットで、買い物をしてみましょう。</p></div>'}`,'bag');return;}
   if(type==='journal'){const g=life.getGoals();showPanel('この街での、あなたの記録','LITTLE MOMENTS, BIG MEMORIES',`<div class="stat-grid"><div><small>歩いた距離</small><strong>${Math.round(life.state.stats.steps)}<span style="font-size:12px"> m</span></strong></div><div><small>働いた回数</small><strong>${life.state.stats.shifts}<span style="font-size:12px"> 回</span></strong></div><div><small>訪れた場所</small><strong>${life.state.visited.length}<span style="font-size:12px"> か所</span></strong></div></div><p>きっかけは、ほんのちいさなこと。すべて自由な順番で楽しめます。</p>${g.map(i=>`<div class="goal-row ${i.done?'done':''}"><span class="goal-check">${i.done?icon('check',15):''}</span><span><strong>${esc(i.title)}</strong><p>${esc(i.description)}</p></span>${!i.done?`<button data-goal-place="${esc(i.buildingId)}">行き先</button>`:'<span class="action-meta positive">完了</span>'}</div>`).join('')}<p class="section-label">暮らしの記録</p>${life.state.journal.slice().reverse().map(e=>`<div class="journal-line"><time>${e.day}日目 ${esc(e.time)}</time><span>${esc(e.text)}</span></div>`).join('')||'<p>今日の思い出を、少しずつ。</p>'}`,'journal');return;}
-  if(type==='settings'){showPanel('暮らしの設定','MAKE YOURSELF AT HOME',`<div class="form-row"><label for="player-name">呼び名<small>この端末での表示名</small></label><input id="player-name" maxlength="24" type="text" value="${esc(life.state.name)}"></div><div class="form-row"><label for="quality">描画品質<small>端末に合わせて変更できます</small></label><select id="quality">${[['auto','自動'],['high','高画質'],['medium','標準'],['low','軽量']].map(([v,t])=>`<option value="${v}" ${life.state.settings.quality===v?'selected':''}>${t}</option>`).join('')}</select></div><div class="form-row"><label for="sensitivity">視点の感度</label><input id="sensitivity" type="range" min="0.25" max="3" step="0.05" value="${life.state.settings.sensitivity}"></div><div class="form-row"><label for="environment-sound">環境音<small>鳥の声と、足音</small></label><input id="environment-sound" type="checkbox" ${life.state.settings.sound?'checked':''}></div><div class="button-row"><button class="secondary-btn" data-cmd="save">今の暮らしを保存</button><button class="secondary-btn" data-cmd="export">セーブを書き出す</button><button class="secondary-btn" data-cmd="import">セーブを読み込む</button><button class="secondary-btn" data-cmd="fullscreen">全画面表示</button></div><div class="notice">暮らしとキャラクターは、このブラウザに保存されます。セーブJSONは暮らしの記録用で、写真・3Dモデルは含みません。別端末へは画像やモデルを再度読み込んでください。</div><div class="button-row"><button class="secondary-btn" data-cmd="location">現在地から始める</button><button class="secondary-btn" data-panel="help">操作方法</button></div><p class="legal-note">© KASAI SOLUTIONS INC. · Three.js (MIT)<br><a href="./about.html" target="_blank" rel="noopener">このゲームについて・データとプライバシー</a></p>`,'settings');return;}
-  if(type==='character'){renderCharacter();return;}if(type==='controller'){renderController();return;}if(type==='help'){renderHelp();return;}if(type==='possessions'){possessions?.openInventory();return;}
-  if(type==='pause'){showPanel('ひと休み、しませんか。','TAKE YOUR TIME',`<div class="pause-card">${icon('leaf',42)}<p>時間は止まっています。<br>準備ができたら、街へ戻りましょう。</p><div class="button-row" style="justify-content:center"><button class="primary-btn" data-cmd="close">街へ戻る</button><button class="secondary-btn" data-panel="settings">設定</button><button class="secondary-btn" data-panel="character">キャラクター</button></div></div>`,'pause');return;}
+  if(type==='settings'){showPanel('暮らしの設定','MAKE YOURSELF AT HOME',`<div class="form-row"><label>プロフィール<small>名前・紹介文・ネーム表示</small></label><button class="secondary-btn" data-panel="profile">プロフィールを開く</button></div><div class="form-row"><label for="quality">描画品質<small>端末に合わせて変更できます</small></label><select id="quality">${[['auto','端末に合わせる'],['cinematic','シネマティック'],['ultra','最高画質'],['high','高画質'],['medium','標準'],['low','軽量']].map(([v,t])=>`<option value="${v}" ${life.state.settings.quality===v?'selected':''}>${t}</option>`).join('')}</select></div><div class="form-row"><label for="sensitivity">視点の感度</label><input id="sensitivity" type="range" min="0.25" max="3" step="0.05" value="${life.state.settings.sensitivity}"></div><div class="form-row"><label for="environment-sound">環境音<small>鳥の声と、足音</small></label><input id="environment-sound" type="checkbox" ${life.state.settings.sound?'checked':''}></div><div class="button-row"><button class="secondary-btn" data-panel="audio">音楽・音量を設定</button></div><div class="button-row"><button class="secondary-btn" data-cmd="save">今の暮らしを保存</button><button class="secondary-btn" data-cmd="export">セーブを書き出す</button><button class="secondary-btn" data-cmd="import">セーブを読み込む</button><button class="secondary-btn" data-cmd="fullscreen">全画面表示</button></div><div class="notice">暮らしとキャラクターは、このブラウザに保存されます。セーブJSONは暮らしの記録用で、写真・3Dモデルは含みません。別端末へは画像やモデルを再度読み込んでください。</div><div class="button-row"><button class="secondary-btn" data-cmd="location">現在地から始める</button><button class="secondary-btn" data-panel="help">操作方法</button></div><p class="legal-note">© KASAI SOLUTIONS INC. · Three.js (MIT)<br><a href="./about.html" target="_blank" rel="noopener">このゲームについて・データとプライバシー</a></p>`,'settings');return;}
+  if(type==='character'){renderCharacter();return;}if(type==='controller'){renderController();return;}if(type==='help'){renderHelp();return;}if(type==='possessions'){if(possessions)possessions.openInventory();else toast('街を読み込んでから、持ち物を開いてください。');return;}
+  if(type==='pause'){showPanel('ひと休み、しませんか。','TAKE YOUR TIME',`<div class="pause-card">${icon('leaf',42)}<p>キャラクターの操作を休止しています。<br>時計は現実の時刻とともに進みます。</p><div class="button-row" style="justify-content:center"><button class="primary-btn" data-cmd="close">街へ戻る</button><button class="secondary-btn" data-panel="settings">設定</button><button class="secondary-btn" data-panel="character">キャラクター</button></div></div>`,'pause');return;}
   if(type==='social'){openSocial();return;}if(type==='location'){openLocation();}
 }
 
-function renderCharacter(){showPanel('あなたのキャラクター','A CHARACTER OF YOUR OWN',`<div class="model-info"><span>${icon('person',31)}</span><span><strong>${esc(characterInfo.name)}</strong><small>${esc(characterInfo.description)}</small></span><button data-cmd="default-avatar">標準に戻す</button></div><p>正面・背面・左・右の写真を読み込み、輪郭から立体的なキャラクターを作ります。背景のない全身画像で、姿勢・大きさ・位置を4枚でそろえるときれいに反映されます。</p><div class="photo-slots">${[['front','前 · 必須'],['back','後ろ'],['left','左'],['right','右']].map(([v,t])=>`<label class="photo-slot">${photoViews[v]?`<img src="${esc(photoViews[v].src)}" alt="${t}の参照画像">`:icon('upload',29)}<span class="slot-label">${t}</span><input type="file" data-photo="${v}" accept="image/png,image/jpeg,image/webp" aria-label="${t}の写真を選択"></label>`).join('')}</div><div class="form-row"><label for="mesh-quality">3Dモデルの精細度<small>細分化を増やして、曲面を滑らかに</small></label><select id="mesh-quality"><option value="standard" ${selectedQuality==='standard'?'selected':''}>標準 · 約2.9万ポリゴン</option><option value="high" ${selectedQuality==='high'?'selected':''}>高精細 · 約8.8万ポリゴン</option><option value="ultra" ${selectedQuality==='ultra'?'selected':''}>最高 · 約17.7万ポリゴン</option></select></div><button class="primary-btn" data-cmd="generate-avatar" ${photoViews.front?'':'disabled'}>${icon('person',19)} 写真から簡易3Dを作成</button><div id="character-output"></div><div class="notice">写真からの形状近似です。4方向の画像を対応する面に貼り、側面の輪郭を奥行きに反映します。見えない面や関節は推定します。AIによる精密な3D復元・フォトグラメトリではありません。ポリゴン数を増やしても、写真にない形は復元されません。</div><p class="section-label">完成した3Dモデルを使う</p><label class="upload-model">${icon('upload',28)}<span><strong>GLB / VRM を読み込む</strong><small>50MB以内・200万ポリゴン以内。外部参照のない非圧縮モデル。<br>既存モーション、または対応する人型骨格から動作を付けます。</small></span><input id="model-upload" type="file" accept=".glb,.vrm" aria-label="3Dモデルを選択"></label><p class="section-label">標準キャラクターの服</p><div class="button-row">${[['ivory','アイボリー'],['navy','ネイビー'],['sage','セージ'],['black','ブラック']].map(([v,t])=>`<button class="secondary-btn" data-style="${v}">${t}</button>`).join('')}</div><p class="legal-note">写真と3Dモデルはこの端末内で処理・保存します。アップロード先のサーバーへ送信しません。</p>`,'character',true);}
+function renderCharacter(){showPanel('あなたのキャラクター','A CHARACTER OF YOUR OWN',`<div class="model-info"><span>${icon('person',31)}</span><span><strong>${esc(characterInfo.name)}</strong><small>${esc(characterInfo.description)}</small></span><button data-cmd="default-avatar">標準に戻す</button></div><p>正面・背面・左・右の写真を読み込み、輪郭から立体的なキャラクターを作ります。背景のない全身画像で、姿勢・大きさ・位置を4枚でそろえるときれいに反映されます。</p><div class="photo-slots">${[['front','前 · 必須'],['back','後ろ'],['left','左'],['right','右']].map(([v,t])=>`<label class="photo-slot">${photoViews[v]?`<img src="${esc(photoViews[v].src)}" alt="${t}の参照画像">`:icon('upload',29)}<span class="slot-label">${t}</span><input type="file" data-photo="${v}" accept="image/png,image/jpeg,image/webp" aria-label="${t}の写真を選択"></label>`).join('')}</div><div class="form-row"><label for="mesh-quality">3Dモデルの精細度<small>細分化を増やして、曲面を滑らかに</small></label><select id="mesh-quality"><option value="standard" ${selectedQuality==='standard'?'selected':''}>標準 · 約2.9万ポリゴン</option><option value="high" ${selectedQuality==='high'?'selected':''}>高精細 · 約8.8万ポリゴン</option><option value="ultra" ${selectedQuality==='ultra'?'selected':''}>超高精細 · 約17.7万ポリゴン</option><option value="cinematic" ${selectedQuality==='cinematic'?'selected':''}>シネマティック · 最大95.2万ポリゴン</option></select></div><button class="primary-btn" data-cmd="generate-avatar" ${photoViews.front?'':'disabled'}>${icon('person',19)} 写真から簡易3Dを作成</button><div id="character-output"></div><div class="notice">写真からの形状近似です。4方向の画像を対応する面に貼り、側面の輪郭を奥行きに反映します。見えない面や関節は推定します。AIによる精密な3D復元・フォトグラメトリではありません。ポリゴン数を増やしても、写真にない形は復元されません。</div><p class="section-label">完成した3Dモデルを使う</p><label class="upload-model">${icon('upload',28)}<span><strong>GLB / VRM を読み込む</strong><small>50MB以内・200万ポリゴン以内。外部参照のない非圧縮モデル。<br>既存モーション、または対応する人型骨格から動作を付けます。</small></span><input id="model-upload" type="file" accept=".glb,.vrm" aria-label="3Dモデルを選択"></label><p class="section-label">標準キャラクターの服</p><div class="button-row">${[['ivory','アイボリー'],['navy','ネイビー'],['sage','セージ'],['black','ブラック']].map(([v,t])=>`<button class="secondary-btn" data-style="${v}">${t}</button>`).join('')}</div><p class="legal-note">写真と3Dモデルはこの端末内で処理・保存します。アップロード先のサーバーへ送信しません。</p>`,'character',true);}
 async function readImage(file){if(file.size>20*1024*1024)throw new Error('画像は1枚20MB以内にしてください。');const src=URL.createObjectURL(file);try{const im=new Image();im.src=src;await im.decode();if(im.width*im.height>80000000)throw new Error('画像が大きすぎます。縦横を8000px以下に縮小してください。');return im;}catch(e){URL.revokeObjectURL(src);throw e;}}
 async function generateAvatar(){if(!photoViews.front)return;const b=$('modal-body').querySelector('[data-cmd="generate-avatar"]');if(b){b.disabled=true;b.textContent='4方向の画像から立体化しています…';}let next=null;try{
   await wait(80);next=createAvatar(THREE);const result=await next.fromImage(photoViews,{quality:selectedQuality});replaceAvatar(next);next=null;characterInfo={name:result.views?.length>1?'写真から作成したキャラクター':'写真から作成したキャラクター',description:`${result.triangles.toLocaleString('ja-JP')}ポリゴン · 画像から簡易立体化`};
+  if(result.budgetCapped)toast('端末のメモリに合わせて、モデルの精細度を調整しました。');
   let saved=true;try{await saveCharacter({type:'photos',views:photoFiles,quality:selectedQuality});}catch(e){saved=false;toast(e.message);}
   if(modalType==='character'){renderCharacter();const out=$('character-output');out.className='character-output';out.textContent=`${characterInfo.description}。待機・歩行・走行・ジャンプの動作を設定しました。${saved?'この端末に保存しました。':'このセッションでは使用できますが、再読み込み時の復元はできません。'}`;}toast('キャラクターを作成しました。街を歩いて確認できます。');
 }catch(e){next?.dispose?.();toast('キャラクターを作成できませんでした：'+e.message);if(b){b.disabled=false;b.textContent='写真から簡易3Dを作成';}}}
-function replaceAvatar(next){avatarRevision++;if(avatar){scene.remove(avatar.group);avatar.dispose?.();}avatar=next;scene.add(avatar.group);avatar.group.position.set(pos.x,activeGround()+jumpY,pos.z);avatar.group.rotation.y=playerYaw;}
+function replaceAvatar(next){avatarRevision++;if(avatar){scene?.remove(avatar.group);avatar.dispose?.();}avatar=next;scene?.add(avatar.group);avatar.group.position.set(pos.x,activeGround()+jumpY,pos.z);avatar.group.rotation.y=playerYaw;measureAvatar();}
 async function importModel(file,persist=true,expectedRevision=null){busy=true;try{const next=await loadCharacterModel(THREE,file,{name:file.name||'3Dモデル'});if(expectedRevision!==null&&avatarRevision!==expectedRevision){next.dispose();return;}replaceAvatar(next);characterInfo={name:file.name||'読み込んだ3Dモデル',description:`${next.triangles.toLocaleString('ja-JP')}ポリゴン · ${next.animations.length?'付属モーション':next.rigged?'骨格モーション':'モデル全体の移動'}`};if(persist){try{await saveCharacter({type:'glb',blob:file,name:file.name});}catch(e){toast(e.message);}}if(modalType==='character'){renderCharacter();const out=$('character-output');out.className='character-output';out.textContent=next.limitations.join(' ');}if(persist)toast('3Dモデルをキャラクターに設定しました。');}catch(e){toast('モデルを読み込めませんでした：'+e.message);}finally{busy=false;}}
 async function restoreCharacter(){const expectedRevision=avatarRevision;let next=null,restoredViews={};try{const r=await loadCharacter();if(!r||avatarRevision!==expectedRevision)return;if(r.type==='glb'){const f=new File([r.blob],r.name||'character.glb');await importModel(f,false,expectedRevision);}else if(r.type==='photos'&&r.views?.front){for(const [v,f] of Object.entries(r.views))restoredViews[v]=await readImage(f);const quality=r.quality||'high';next=createAvatar(THREE);const result=await next.fromImage(restoredViews,{quality});if(avatarRevision!==expectedRevision){next.dispose();next=null;return;}replaceAvatar(next);next=null;for(const previous of Object.values(photoViews))URL.revokeObjectURL(previous.src);photoViews=restoredViews;restoredViews=null;photoFiles={...r.views};selectedQuality=quality;characterInfo={name:'保存した写真キャラクター',description:`${result.triangles.toLocaleString('ja-JP')}ポリゴン · 画像から簡易立体化`};}}catch(e){next?.dispose?.();toast('キャラクターを復元できませんでした：'+e.message);}finally{for(const image of Object.values(restoredViews||{}))URL.revokeObjectURL(image.src);}}
 
@@ -236,7 +301,7 @@ function handleGamepadMenu(pad,now){if(!modalType){if(!started&&pad.jump)openLoc
 
 function renderHelp(){showPanel('街での過ごし方','A SMALL GUIDE TO YOUR NEW LIFE',`<div class="help-grid"><div class="help-card"><h3>${icon('walk')} PC</h3><p><kbd>W A S D</kbd> / 矢印キー：移動</p><p>画面をドラッグ：視点を回す</p><p><kbd>Shift</kbd>：走る　<kbd>Space</kbd>：ジャンプ</p><p><kbd>E</kbd>：調べる・入る・話す</p><p><kbd>M</kbd>：地図　<kbd>Tab</kbd>：持ち物</p><p><kbd>V</kbd>：視点　<kbd>Esc</kbd>：一時停止</p></div><div class="help-card"><h3>${icon('hand')} スマホ・タブレット</h3><p>左下のスティックでキャラクターを移動。</p><p>画面右側をなぞって、視点を回します。</p><p>右下の手のボタンで、入口や家具を調べます。</p><p>走るボタンを押し続けると走ります。</p></div><div class="help-card"><h3>${icon('gamepad')} コントローラー</h3><p>USB / Bluetooth接続後、ボタンを押すと認識します。</p><p>左スティックで移動、右で視点。割り当ては設定で変更できます。</p></div><div class="help-card"><h3>${icon('home')} 暮らす</h3><p>入口の近くで「入る」を選ぶと、建物の中へ。</p><p>店内のカウンターや自宅の家具に近づいて、食事・仕事・料理・休息を選びます。</p></div></div><div class="notice">現在地モードは実地図に基づく配置です。建物の外観・内部は推定やゲーム用表現です。現実の通行規制や道路の安全を案内するナビゲーション用途には使えません。</div>`,'help');}
 
-async function openSocial(){if(!social){try{const m=await import('./social.js');social=m.initSocial({openPanel:(t,e,h)=>showPanel(t,e,h,'social',true),toast,icon,escapeHTML:esc,baseUrl:WORLD_URL});}catch(e){showPanel('オンラインにつながる','WORLD COMMUNITY',`<p>オンライン機能を読み込めませんでした。通信を確認し、再読み込みしてください。</p><a class="primary-btn" href="${WORLD_URL}">オンライン版を開く</a>`,'social');return;}}await social.open();modalType='social';}
+async function openSocial(){if(!social){try{const m=await import('./social.js');social=m.initSocial({openPanel:(t,e,h)=>showPanel(t,e,h,'social',true),toast,icon,escapeHTML:esc,baseUrl:WORLD_URL,profile});}catch(e){showPanel('オンラインにつながる','WORLD COMMUNITY',`<p>オンライン機能を読み込めませんでした。通信を確認し、再読み込みしてください。</p><a class="primary-btn" href="${WORLD_URL}">オンライン版を開く</a>`,'social');return;}}await social.open();modalType='social';}
 
 async function initPossessions(){try{const {createPossessions}=await import('./possessions.js');possessions=await createPossessions(THREE,{life,toast,openPanel:(t,e,h)=>showPanel(t,e,h,'possessions',true),onPlace:async(item)=>{if(!activeBuilding||activeBuilding.type!=='home'||!active.addFurniture){toast('自分の部屋に入ってから、所有した家具を配置してください。');return false;}const result=await active.addFurniture(item.type,{color:item.color,id:item.id});if(!result?.ok){toast(result?.message||'配置できる場所がありません。クラフト画面で空間を作ってください。');return false;}return true;}});scene.add(possessions.group);possessions.attachWorld(world,(x,z,r)=>collides(x,z,r));possessions.group.visible=!activeBuilding;}catch(e){console.warn('Personal objects are unavailable',e);}}
 function disposeGroup(group){const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const v of Object.values(mat))if(v?.isTexture)textures.add(v);}});for(const t of textures)t.dispose();for(const g of geometries)g.dispose();for(const m of materials)m.dispose();}
@@ -244,25 +309,29 @@ function disposeGroup(group){const geometries=new Set(),materials=new Set(),text
 function setupUI(){
   $('start').addEventListener('click',openLocation);$('demo-start')?.addEventListener('click',startDemo);$('close-modal').addEventListener('click',closeModal);$('modal-layer').addEventListener('click',e=>{if(e.target===$('modal-layer'))closeModal();});
   document.addEventListener('click',e=>{const el=e.target.closest('[data-panel]');if(el){e.preventDefault();openPanel(el.dataset.panel);}});
-  $('sound-toggle').addEventListener('click',()=>{life.state.settings.sound=!life.state.settings.sound;if(life.state.settings.sound)audio.start();else audio.stop();saveGame();updateHUD();});
+  $('sound-toggle').addEventListener('click',()=>openPanel('audio'));
   $('view-toggle').addEventListener('click',setView);$('interact-btn').addEventListener('click',interact);$('touch-interact').addEventListener('click',interact);$('touch-jump').addEventListener('click',doJump);$('clear-destination').addEventListener('click',()=>{selectedDestination=null;updateHUD();});
-  $('modal-body').addEventListener('click',async e=>{if(['social','craft','possessions'].includes(modalType))return;const btn=e.target.closest('button');if(!btn)return;
+  $('modal-body').addEventListener('click',async e=>{if(['social','profile','craft','possessions'].includes(modalType))return;const btn=e.target.closest('button');if(!btn)return;
     if(btn.dataset.action){performAction(btn.dataset.action);return;}
     if(btn.dataset.destination){selectedDestination=world.buildings.find(b=>b.id===btn.dataset.destination);closeModal();toast('行き先を設定しました。キャラクターを操作して向かいましょう。');return;}
     if(btn.dataset.goalPlace){const b=world.buildings.filter(b=>b.type===btn.dataset.goalPlace||b.id===btn.dataset.goalPlace).sort((a,b)=>Math.hypot(a.x-pos.x,a.z-pos.z)-Math.hypot(b.x-pos.x,b.z-pos.z))[0];if(b){selectedDestination=b;closeModal();}else toast('読み込んだ周辺に対応する施設が見つかりません。別のエリアか、ひかり町で体験できます。');return;}
     if(btn.dataset.style){const n=createAvatar(THREE);n.setStyle(btn.dataset.style);replaceAvatar(n);characterInfo={name:'街の住人',description:'標準キャラクター · 関節モーション'};try{await deleteCharacter();}catch(e){toast(e.message);}renderCharacter();return;}
-    switch(btn.dataset.cmd){case'close':closeModal();break;case'demo':startDemo();break;case'location':openLocation();break;case'locate':locate();break;case'coordinates':{const lat=$('latitude-input').value,lon=$('longitude-input').value;if(!lat.trim()||!lon.trim()){toast('緯度と経度を両方入力してください。');break;}loadReal(Number(lat),Number(lon));break;}case'cancel-geo':geoController?.abort();busy=false;closeModal();break;case'exit':closeModal();leaveBuilding();break;case'save':{const r=saveGame();toast(r?.ok?'暮らしを保存しました。':r?.message||'保存できませんでした。');break;}case'export':saveGame();downloadBlob(new Blob([life.exportSave()],{type:'application/json'}),'machi-life-save.json');break;case'import':$('save-upload').click();break;case'fullscreen':if(!document.fullscreenElement)document.documentElement.requestFullscreen?.().catch(()=>toast('全画面表示には対応していません。'));else document.exitFullscreen?.();break;case'generate-avatar':generateAvatar();break;case'default-avatar':replaceAvatar(createAvatar(THREE));characterInfo={name:'街の住人',description:'標準キャラクター · 関節モーション'};try{await deleteCharacter();}catch(e){toast(e.message);}renderCharacter();break;case'calibrate':toast(gamepad.calibrate().message);break;case'vibrate':if(!await gamepad.vibrate({duration:150,strongMagnitude:.4,weakMagnitude:.5}))toast('このコントローラー・ブラウザでは振動を使用できません。');break;case'reset-pad':gamepad.resetConfig();renderController();break;case'reload':location.reload();break;}
+    switch(btn.dataset.cmd){case'close':closeModal();break;case'demo':startDemo();break;case'location':openLocation();break;case'locate':locate();break;case'music-retry':life.syncClock();music.update(life.state.minutes);music.retry();break;case'retry-geo-small':if(lastRequestedLocation){const v=lastRequestedLocation;loadReal(v.latitude,v.longitude,{...v,radius:150});}break;case'coordinates':{const lat=$('latitude-input').value,lon=$('longitude-input').value;if(!lat.trim()||!lon.trim()){toast('緯度と経度を両方入力してください。');break;}loadReal(Number(lat),Number(lon));break;}case'cancel-geo':geoController?.abort();busy=false;closeModal();break;case'exit':closeModal();leaveBuilding();break;case'save':{const r=saveGame();toast(r?.ok?'暮らしを保存しました。':r?.message||'保存できませんでした。');break;}case'export':saveGame();downloadBlob(new Blob([life.exportSave()],{type:'application/json'}),'machi-life-save.json');break;case'import':$('save-upload').click();break;case'fullscreen':if(!document.fullscreenElement)document.documentElement.requestFullscreen?.().catch(()=>toast('全画面表示には対応していません。'));else document.exitFullscreen?.();break;case'generate-avatar':generateAvatar();break;case'default-avatar':replaceAvatar(createAvatar(THREE));characterInfo={name:'街の住人',description:'標準キャラクター · 関節モーション'};try{await deleteCharacter();}catch(e){toast(e.message);}renderCharacter();break;case'calibrate':toast(gamepad.calibrate().message);break;case'vibrate':if(!await gamepad.vibrate({duration:150,strongMagnitude:.4,weakMagnitude:.5}))toast('このコントローラー・ブラウザでは振動を使用できません。');break;case'reset-pad':gamepad.resetConfig();renderController();break;case'reload':location.reload();break;}
   });
   $('modal-body').addEventListener('change',async e=>{const t=e.target;
     if(t.dataset.photo&&t.files?.[0]){try{const v=t.dataset.photo,file=t.files[0],nextImage=await readImage(file),previous=photoViews[v];photoViews[v]=nextImage;photoFiles[v]=file;if(previous)URL.revokeObjectURL(previous.src);if(modalType==='character')renderCharacter();}catch(err){toast(err.message);}return;}
     if(t.id==='model-upload'&&t.files?.[0]){await importModel(t.files[0]);return;}
     if(t.dataset.padConfig){gamepad.setConfig({[t.dataset.padConfig]:t.type==='checkbox'?t.checked:Number(t.value)});return;}
     if(t.id==='mesh-quality')selectedQuality=t.value;
-    if(t.id==='player-name'){life.state.name=t.value.trim()||'あなた';saveGame();}
+    if(t.id==='world-radius')selectedWorldRadius=Number(t.value);
+    if(t.id==='music-toggle')music.setEnabled(t.checked);
+    if(t.id==='music-volume')music.setVolume(Number(t.value)/100);
     if(t.id==='quality'){life.state.settings.quality=t.value;applyQuality(t.value);saveGame();}
     if(t.id==='sensitivity'){life.state.settings.sensitivity=Number(t.value);saveGame();}
     if(t.id==='environment-sound'){life.state.settings.sound=t.checked;t.checked?audio.start():audio.stop();saveGame();updateHUD();}
   });
+  $('modal-body').addEventListener('input',e=>{if(e.target.id==='music-volume')music.setVolume(Number(e.target.value)/100);});
+  document.addEventListener('keydown',e=>{if(!renderer&&e.code==='Escape'&&modalType)closeModal();});
   $('save-upload').addEventListener('change',async e=>{const f=e.target.files?.[0];if(!f)return;try{const r=life.importSave(await f.text());toast(r.message);if(r.ok){applyQuality(life.state.settings.quality);updateHUD();closeModal();}}catch(err){toast(err.message);}e.target.value='';});
 }
 function setupControls(){
@@ -280,7 +349,22 @@ function setupControls(){
   const endJoy=e=>{if(e.pointerId!==joyId)return;joyId=null;touch.x=touch.y=0;knob.style.transform='';};joy.addEventListener('pointerup',endJoy);joy.addEventListener('pointercancel',endJoy);joy.addEventListener('lostpointercapture',endJoy);
   $('touch-run').addEventListener('pointerdown',e=>{touch.run=true;e.currentTarget.setPointerCapture(e.pointerId);});for(const event of ['pointerup','pointercancel','lostpointercapture'])$('touch-run').addEventListener(event,()=>touch.run=false);
 }
-function applyQuality(level){if(!renderer)return;const ratio=level==='low'?.85:level==='medium'?1.1:level==='high'?Math.min(devicePixelRatio,2):Math.min(devicePixelRatio,matchMedia('(pointer:coarse)').matches?1.25:1.6)*autoQuality;renderer.setPixelRatio(ratio);renderer.shadowMap.enabled=level!=='low';if(sun){const size=level==='high'?2048:level==='low'?512:1024;if(sun.shadow.mapSize.x!==size){sun.shadow.mapSize.set(size,size);sun.shadow.map?.dispose();sun.shadow.map=null;}}}
+function applyQuality(level){
+  if(!renderer)return;const coarse=matchMedia('(pointer:coarse)').matches,maxTexture=renderer.capabilities.maxTextureSize;
+  const cap=level==='low'?1:level==='medium'?1.25:level==='high'?1.8:level==='ultra'?2:level==='cinematic'?2.5:coarse?1.3:1.8;
+  renderer.setPixelRatio(Math.min(devicePixelRatio,cap)*(level==='auto'?autoQuality:1));renderer.shadowMap.enabled=level!=='low';
+  if(sun){const requested=level==='cinematic'?4096:level==='ultra'||level==='high'?2048:level==='low'?512:1024;const size=Math.min(maxTexture,coarse?2048:4096,requested);if(sun.shadow.mapSize.x!==size){sun.shadow.mapSize.set(size,size);sun.shadow.map?.dispose();sun.shadow.map=null;}}
+  const worldLevel=level==='auto'&&autoQuality<1?'medium':level;world?.setQuality?.(worldLevel);for(const room of interiorCache.values())room.setQuality?.(worldLevel);
+}
+function renderMenu(){
+  const entries=[['location','pin','場所を選ぶ','住所・現在地から移動'],['profile','person','プロフィール','名前・自己紹介・ネーム表示'],['character','person','キャラクター','写真・3Dモデル・服'],['social','chat','オンライン','チャット・通話・フレンド'],['audio','music','音楽・環境音','朝・昼・夜のBGMと音量'],['controller','gamepad','コントローラー','接続・ボタン割り当て'],['settings','settings','設定','描画品質・保存'],['help','help','操作方法','移動・暮らし方']];
+  showPanel('あなたの暮らしを整える','MACHI MENU',`<div class="menu-grid">${entries.map(([id,symbol,title,detail])=>`<button class="menu-card" data-panel="${id}"><span>${icon(symbol,24)}</span><strong>${title}</strong><small>${detail}</small></button>`).join('')}</div>`,'menu',true);
+}
+function renderAudio(){
+  life.syncClock();music.update(life.state.minutes);const state=music.getState();
+  showPanel('暮らしに、音楽を','SOUND OF YOUR DAY',`<p>端末の現実時刻に合わせて、朝・昼・夜の曲へ自動で切り替わります。</p><div class="music-tracks">${Object.values(MUSIC_TRACKS).map(t=>`<div class="music-track ${t.id===state.period?'current':''}" data-music-period="${t.id}"><span>${icon(t.id==='night'?'moon':'sun',24)}</span><strong>${t.label}<b>${t.source}</b></strong><small>${t.hours}</small></div>`).join('')}</div><div class="form-row"><label for="music-toggle">BGM<small>選んだ曲を繰り返し再生</small></label><input id="music-toggle" type="checkbox" ${state.enabled?'checked':''}></div><div class="form-row"><label for="music-volume">音楽の音量<small id="music-volume-label">${Math.round(state.volume*100)}%</small></label><input id="music-volume" type="range" min="0" max="100" value="${Math.round(state.volume*100)}"></div><p id="music-status" class="music-status" aria-live="polite"></p><button class="secondary-btn" data-cmd="music-retry">${icon('music',18)} 再生する</button><div class="form-row"><label for="environment-sound">環境音<small>鳥の声・歩く足音</small></label><input id="environment-sound" type="checkbox" ${life.state.settings.sound?'checked':''}></div><p class="legal-note">朝 05:00〜10:59 · 昼 11:00〜17:59 · 夜 18:00〜04:59。別のタブやアプリへ移動した間は音楽を休止します。</p>`,'audio');updateMusicUI(state);
+}
+
 function downloadBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);}
 
 const audio={ctx:null,gain:null,timer:null,noise:null,start(){if(!this.ctx){try{this.ctx=new(window.AudioContext||window.webkitAudioContext)();this.gain=this.ctx.createGain();this.gain.gain.value=.06;this.gain.connect(this.ctx.destination);}catch{return;}}this.ctx.resume().catch(()=>{});if(!this.timer)this.timer=setInterval(()=>{if(started&&!activeBuilding&&!document.hidden&&life.state.settings.sound)this.bird();},4200);},stop(){clearInterval(this.timer);this.timer=null;this.ctx?.suspend().catch(()=>{});},bird(){if(!this.ctx||this.ctx.state!=='running')return;const t=this.ctx.currentTime;for(let i=0;i<2;i++){const o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type='sine';o.frequency.setValueAtTime(1600+Math.random()*800,t+i*.13);o.frequency.exponentialRampToValueAtTime(2900,t+i*.13+.07);g.gain.setValueAtTime(0,t+i*.13);g.gain.linearRampToValueAtTime(.13,t+i*.13+.02);g.gain.exponentialRampToValueAtTime(.001,t+i*.13+.11);o.connect(g);g.connect(this.gain);o.start(t+i*.13);o.stop(t+i*.13+.12);}},step(){if(!life.state.settings.sound||!this.ctx||this.ctx.state!=='running')return;const t=this.ctx.currentTime,o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type='triangle';o.frequency.setValueAtTime(80,t);o.frequency.exponentialRampToValueAtTime(30,t+.07);g.gain.setValueAtTime(.17,t);g.gain.exponentialRampToValueAtTime(.001,t+.09);o.connect(g);g.connect(this.gain);o.start(t);o.stop(t+.1);}};

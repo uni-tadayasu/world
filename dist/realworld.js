@@ -1,3 +1,5 @@
+import {createMaterialLibrary,createVegetationDetail} from './materials.js';
+import {createTraffic} from './traffic.js';
 /* Real street geometry from OpenStreetMap. Facades and interiors remain game representations. */
 const ENDPOINT = 'https://overpass.private.coffee/api/interpreter';
 const CACHE_KEY = 'machi-realworld-osm-v1';
@@ -5,55 +7,71 @@ const CACHE_AGE = 24 * 60 * 60 * 1000;
 const EARTH_RADIUS = 6378137;
 const MAX_RESPONSE_BYTES = 24 * 1024 * 1024;
 
-/** onProgress(message, fraction); requests exactly one bounded OSM snapshot, without retries. */
-export async function createRealWorld(THREE, { latitude, longitude, radius = 450, onProgress = () => {}, signal, terrain } = {}) {
+/** onProgress(message, fraction); bounded map snapshot, with one transport fallback only. */
+export async function createRealWorld(THREE, { latitude, longitude, radius = 250, onProgress = () => {}, signal, terrain, terrainPromise } = {}) {
   const options = validateOptions({latitude, longitude, radius, terrain});
+  // Attach a handler immediately while the independent map request starts. Root decides
+  // whether unavailable elevation is an error or a flat-terrain fallback.
+  const pendingTerrain=terrainPromise?Promise.resolve(terrainPromise).then(value=>({value}),error=>({error})):null;
   if (signal?.aborted) throw new DOMException('街の読み込みを中止しました。', 'AbortError');
   const key = `${options.latitude.toFixed(5)},${options.longitude.toFixed(5)},${options.radius}`;
-  let data = readCache(key), cached = Boolean(data);
+  const cachedRow=readCache(key);let data=cachedRow?.data||null,cached=Boolean(data);
+  let transport=cachedRow?.transport||'direct',provider=cachedRow?.provider||'private.coffee',endpoint=cachedRow?.endpoint||ENDPOINT;
   onProgress(cached ? '保存済みの実際の街データを開いています…' : '現在地周辺の道路・建物データを取得しています…', .1);
   if (!data) {
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 35000);
-    const abort = () => controller.abort();
-    signal?.addEventListener('abort', abort, {once:true});
-    try {
-      const lat = options.latitude.toFixed(7), lon = options.longitude.toFixed(7), r = options.radius;
-      const around = `(around:${r},${lat},${lon})`;
-      const query = `[out:json][timeout:25][maxsize:33554432];(\n` +
-        `way${around}["building"];way${around}["building:part"];\n` +
-        `way${around}["highway"];way${around}["leisure"];way${around}["landuse"];\n` +
-        `way${around}["natural"~"^(water|wood|scrub|wetland|beach)$"];way${around}["waterway"];\n` +
-        `relation${around}["type"="multipolygon"]["natural"="water"];\n` +
-        `node${around}["shop"];node${around}["amenity"];node${around}["entrance"];node${around}["natural"="tree"];\n` +
-        `);out geom;`;
-      const response = await fetch(ENDPOINT, {
-        method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
-        body: new URLSearchParams({data:query}).toString(), signal:controller.signal,
-        credentials:'omit', referrerPolicy:'no-referrer'
-      });
-      if (response.status === 429) throw new Error('地図サーバーが混み合っています。自動再試行はしていません。少し時間を置いてから、もう一度読み込んでください。');
-      if (!response.ok) throw new Error(`街データを取得できませんでした（HTTP ${response.status}）。時間を置いてからお試しください。`);
-      const declared = Number(response.headers.get('content-length'));
-      if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error('この地域の地図データが大きすぎます。取得範囲を小さくしてください。');
-      const text = await response.text();
-      if (text.length > MAX_RESPONSE_BYTES) throw new Error('この地域の地図データが大きすぎます。取得範囲を小さくしてください。');
-      try { data = JSON.parse(text); } catch { throw new Error('地図サーバーから正しいデータを受け取れませんでした。時間を置いてからお試しください。'); }
-      if (data.remark) throw new Error('地図サーバーが処理を完了できませんでした。時間を置くか取得範囲を小さくしてください。');
-      if (!Array.isArray(data.elements)) throw new Error('道路・建物データの形式が正しくありません。');
-      writeCache(key,data);
-    } catch (error) {
-      if (timedOut) throw new Error('地図の取得が35秒以内に完了しませんでした。自動再試行はしていません。もう一度読み込むか、範囲を小さくしてください。');
-      if (signal?.aborted) throw new DOMException('街の読み込みを中止しました。','AbortError');
-      if (error instanceof TypeError) throw new Error('地図サーバーに接続できませんでした。通信状況をご確認ください。');
-      throw error;
-    } finally { clearTimeout(timer); signal?.removeEventListener('abort',abort); }
+    const started=Date.now(),deadline=started+55000;
+    const canonical='https://machi-life.hisa-0128-1996.chatgpt.site';
+    const origin=typeof location!=='undefined'?location.origin:'';
+    const proxyOrigin=origin===canonical?origin:canonical;
+    const params=new URLSearchParams({lat:options.latitude.toFixed(7),lon:options.longitude.toFixed(7),radius:String(options.radius)});
+    const proxyUrl=`${proxyOrigin}/api/world?${params}`;
+    const lat=options.latitude.toFixed(7),lon=options.longitude.toFixed(7),r=options.radius,around=`(around:${r},${lat},${lon})`;
+    const query=`[out:json][timeout:8][maxsize:33554432];(`+
+      `way${around}["building"];way${around}["building:part"];way${around}["highway"];way${around}["leisure"];way${around}["landuse"];`+
+      `way${around}["natural"~"^(water|wood|scrub|wetland|beach)$"];way${around}["waterway"];`+
+      `relation${around}["type"="multipolygon"]["natural"="water"];`+
+      `node${around}["shop"];node${around}["amenity"];node${around}["entrance"];node${around}["natural"="tree"];);out geom;`;
+    async function request(url,init,timeoutMs){
+      const controller=new AbortController();let timedOut=false;
+      const timer=setTimeout(()=>{timedOut=true;controller.abort();},Math.max(1,timeoutMs));
+      const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
+      try{
+        if(signal?.aborted)throw new DOMException('街の読み込みを中止しました。','AbortError');
+        const response=await fetch(url,{...init,signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer'});
+        if(response.status===429||response.status===406){const e=new Error(response.status===429?'地図サーバーが混み合っています。自動再試行はしていません。少し時間を置いてから、もう一度読み込んでください。':'地図サーバーがこのリクエストを受け付けませんでした。少し時間を置いてからお試しください。');e.status=response.status;throw e;}
+        if(!response.ok){const e=new Error(`街データを取得できませんでした（HTTP ${response.status}）。時間を置いてからお試しください。`);e.status=response.status;throw e;}
+        const declared=Number(response.headers.get('content-length'));if(Number.isFinite(declared)&&declared>MAX_RESPONSE_BYTES)throw new Error('この地域の地図データが大きすぎます。取得範囲を小さくしてください。');
+        const text=await response.text();if(text.length>MAX_RESPONSE_BYTES)throw new Error('この地域の地図データが大きすぎます。取得範囲を小さくしてください。');
+        let parsed;try{parsed=JSON.parse(text);}catch{throw new Error('地図サーバーから正しいデータを受け取れませんでした。時間を置いてからお試しください。');}
+        if(parsed.remark)throw new Error('地図サーバーが処理を完了できませんでした。時間を置くか取得範囲を小さくしてください。');
+        if(!Array.isArray(parsed.elements))throw new Error('道路・建物データの形式が正しくありません。');
+        return {data:parsed,provider:response.headers.get('X-World-Provider')||null};
+      }catch(error){
+        if(signal?.aborted)throw new DOMException('街の読み込みを中止しました。','AbortError');
+        if(timedOut){const e=new Error('地図データの応答が制限時間内に届きませんでした。取得範囲を小さくして、もう一度お試しください。');e.transportFailure=true;throw e;}
+        if(error instanceof TypeError){const e=new Error('地図サーバーに接続できませんでした。通信状況をご確認ください。');e.transportFailure=true;throw e;}
+        throw error;
+      }finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
+    }
+    try{
+      const result=await request(proxyUrl,{method:'GET',headers:{Accept:'application/json'}},45000);
+      data=result.data;transport='proxy';provider=result.provider||'公開地図中継';endpoint=`${proxyOrigin}/api/world`;
+    }catch(error){
+      if(signal?.aborted||error.name==='AbortError')throw error;
+      // Rate/policy responses are terminal. A single direct transport attempt is
+      // reserved for an unreachable intermediary or its service-unavailable reply.
+      if(!(error.transportFailure||error.status===503)||deadline-Date.now()<500)throw error;
+      onProgress('地図の接続経路を切り替えています…',.28);
+      const result=await request(ENDPOINT,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query}).toString()},Math.min(10000,deadline-Date.now()));
+      data=result.data;transport='direct';provider='private.coffee';endpoint=ENDPOINT;
+    }
+    writeCache(key,data,{transport,provider,endpoint});
   }
+  if(pendingTerrain){onProgress('街の地形データを組み合わせています…',.56);const result=await pendingTerrain;if(result.error)throw result.error;options.terrain=result.value;}
   if (signal?.aborted) throw new DOMException('街の読み込みを中止しました。','AbortError');
   onProgress('実際の建物の輪郭と道路を3Dに組み立てています…', .64);
   const world = buildRealWorldFromData(THREE, data, options);
-  world.sourceInfo.cached = cached;
+  Object.assign(world.sourceInfo,{cached,provider,transport,endpoint});
   onProgress('現在地の街を読み込みました。',1);
   return world;
 }
@@ -62,6 +80,7 @@ export async function createRealWorld(THREE, { latitude, longitude, radius = 450
 export function buildRealWorldFromData(THREE, data, input = {}) {
   const {latitude,longitude,radius,terrain} = validateOptions(input);
   if (!Array.isArray(data?.elements)) throw new Error('OpenStreetMapデータがありません。');
+  const library=createMaterialLibrary(THREE,{quality:'high'}),treeRecords=[];
   const group = new THREE.Group(); group.name='現在地の街';
   const colliders=[], interactables=[], buildings=[], mapFeatures={roads:[],areas:[],origin:{x:0,z:0}};
   const resources={geometries:new Set(),materials:new Set(),textures:new Set()};
@@ -71,13 +90,13 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   const toGeo=(x,z)=>({latitude:latitude-z/EARTH_RADIUS*180/Math.PI,longitude:normalizeLon(longitude+x/(EARTH_RADIUS*cosLat)*180/Math.PI)});
   const rawHeight=typeof terrain==='function'?terrain:typeof terrain?.heightAt==='function'?terrain.heightAt.bind(terrain):()=>0;
   const terrainHeight=(x,z)=>{const n=rawHeight(x,z);return Number.isFinite(n)?n:0;};
-  const material=(color,extra={})=>{const m=new THREE.MeshStandardMaterial({color,roughness:.83,...extra});resources.materials.add(m);return m;};
+  const material=(color,extra={},kind='stone')=>{const m=library.material(kind,color,{roughness:.83,...extra});resources.materials.add(m);return m;};
   const wallPalette=['#d9d2c2','#c9c7bb','#b9b6a8','#dedbcf','#d7c5ad','#c0b5a6','#c6c9c2','#d2cdc0'].map(c=>material(c));
   const roofPalette=['#818e8a','#8c8d82','#a9aa9c','#71817e'].map(c=>material(c));
-  const asphalt=material('#626d6b'), sidewalk=material('#c6c3b4'), pathMat=material('#b4b49b'), waterMat=material('#7da4a1',{metalness:.25,roughness:.28});
-  const windowMat=material('#73908e',{roughness:.3,metalness:.4,emissive:'#576c67',emissiveIntensity:.08});
-  const railMat=material('#4d5f59',{metalness:.3,roughness:.6});
-  const leafMat=material('#6e8754'), trunkMat=material('#75664d');
+  const asphalt=material('#626d6b',{},'asphalt'), sidewalk=material('#c6c3b4',{},'paving'), pathMat=material('#b4b49b',{},'stone'), waterMat=material('#7da4a1',{metalness:.25,roughness:.2},'water');
+  const windowMat=material('#73908e',{roughness:.18,metalness:.38,emissive:'#576c67',emissiveIntensity:.08},'glass');
+  const railMat=material('#4d5f59',{metalness:.3,roughness:.6},'metal'),frameMat=material('#78817b',{metalness:.3,roughness:.5},'metal'),sillMat=material('#c8c7bc'),roadPaint=material('#e0ded0',{roughness:.97});
+  const leafMat=material('#6e8754',{},'leaf'), trunkMat=material('#75664d',{},'bark');
   const batches=new Map(), instances=new Map();
   function addGeometry(geometry,materials){
     const geo=geometry.index?geometry.toNonIndexed():geometry;
@@ -91,7 +110,7 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     }
     if(geo!==geometry)geo.dispose();geometry.dispose();
   }
-  const unitBox=new THREE.BoxGeometry(1,1,1),unitSphere=new THREE.SphereGeometry(1,12,8),unitCylinder=new THREE.CylinderGeometry(1,1,1,10);
+  const unitBox=new THREE.BoxGeometry(1,1,1),unitSphere=library.sphere(true),unitCylinder=library.cylinder();
   resources.geometries.add(unitBox);resources.geometries.add(unitSphere);resources.geometries.add(unitCylinder);
   const matrix=new THREE.Matrix4(),position=new THREE.Vector3(),scale=new THREE.Vector3(),quaternion=new THREE.Quaternion(),euler=new THREE.Euler();
   function instance(geo,mat,x,y,z,sx,sy,sz,ry=0){
@@ -110,28 +129,29 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     geometry.computeVertexNormals();addGeometry(geometry,mat);
   }
   function ribbon(points,width,mat,offset=.045){
-    const p=[];
+    const p=[],uv=[];
     for(let i=1;i<points.length;i++){
       const a=points[i-1],b=points[i],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz);if(len<.05)continue;
       const nx=-dz/len*width/2,nz=dx/len*width/2,steps=Math.ceil(len/7);
       for(let j=0;j<steps;j++){
         const aa={x:a.x+dx*j/steps,z:a.z+dz*j/steps},bb={x:a.x+dx*(j+1)/steps,z:a.z+dz*(j+1)/steps};
         const corners=[{x:aa.x+nx,z:aa.z+nz},{x:aa.x-nx,z:aa.z-nz},{x:bb.x+nx,z:bb.z+nz},{x:bb.x-nx,z:bb.z-nz}];
-        for(const k of [0,2,1,1,2,3]){const c=corners[k];p.push(c.x,terrainHeight(c.x,c.z)+offset,c.z);}
+        for(const k of [0,2,1,1,2,3]){const c=corners[k];p.push(c.x,terrainHeight(c.x,c.z)+offset,c.z);uv.push(c.x/5,c.z/5);}
       }
     }
-    if(!p.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.computeVertexNormals();addGeometry(geo,mat);
+    if(!p.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();addGeometry(geo,mat);
   }
   // Elevations are relative to the starting location; no added absolute elevation offset.
   const groundGeo=new THREE.PlaneGeometry(radius*2,radius*2,96,96);groundGeo.rotateX(-Math.PI/2);
   const groundPos=groundGeo.attributes.position;
   for(let i=0;i<groundPos.count;i++)groundPos.setY(i,terrainHeight(groundPos.getX(i),groundPos.getZ(i))-.015);
   groundGeo.computeVertexNormals();resources.geometries.add(groundGeo);
-  const ground=new THREE.Mesh(groundGeo,material('#b5b7a1'));ground.receiveShadow=true;group.add(ground);
+  const groundMaterial=material('#b5b7a1',{},'grass');library.apply(groundMaterial,'grass',{preserveMap:false,repeat:new THREE.Vector2(radius/4,radius/4)});
+  const ground=new THREE.Mesh(groundGeo,groundMaterial);ground.receiveShadow=true;group.add(ground);
   const nodes=data.elements.filter(e=>e.type==='node'&&Number.isFinite(e.lat)&&Number.isFinite(e.lon)).map(e=>({...e,point:toLocal(e.lat,e.lon)}));
   const ways=data.elements.filter(e=>e.type==='way'&&Array.isArray(e.geometry)&&e.geometry.length>1).map(e=>({...e,points:cleanPoints(e.geometry.map(p=>toLocal(p.lat,p.lon))),linePoints:e.geometry.map(p=>toLocal(p.lat,p.lon))}));
   const insideCoverage=p=>Math.abs(p.x)<=radius+80&&Math.abs(p.z)<=radius+80;
-  let areaCount=0, inferredHeightCount=0, mappedHeightCount=0, windowCount=0, sceneryTrees=0;
+  let areaCount=0, inferredHeightCount=0, mappedHeightCount=0, windowCount=0, detailedWindowCount=0, sceneryTrees=0;
   const greenAreas=[], waterAreas=[];
   const areaMats=new Map();
   function drawArea(points,holes,tags,id){
@@ -162,9 +182,11 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
       const roadType=t.highway,width=roadWidth(t),pedestrian=['footway','path','pedestrian','cycleway','steps','bridleway'].includes(roadType);
       const fragments=clipPolyline(way.linePoints,bounds);
       for(let part=0;part<fragments.length;part++){const points=fragments[part];
-        mapFeatures.roads.push({id:`osm-way-${way.id}-${part}`,name:t.name||'',points,width,type:roadType,inferredWidth:!t.width});
+        mapFeatures.roads.push({id:`osm-way-${way.id}-${part}`,name:t.name||'',points,width,type:roadType,inferredWidth:!t.width,oneWay:t.oneway||'no',foot:t.foot||'',bridge:t.bridge==='yes',sidewalk:t.sidewalk||''});
         if(!pedestrian)ribbon(points,width+1.7,sidewalk,.037);
         ribbon(points,width,pedestrian?pathMat:asphalt,pedestrian?.049:.059);
+        // Generic lane detail follows mapped geometry; it is decorative, not a record of local markings.
+        if(!pedestrian&&width>=6&&roadType!=='service')for(let j=1;j<points.length;j++){const a=points[j-1],b=points[j],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz),yaw=Math.atan2(dx,dz);if(len<8)continue;for(let d=3;d<len-3;d+=8){const x=a.x+dx*d/len,z=a.z+dz*d/len;instance(unitBox,roadPaint,x,terrainHeight(x,z)+.07,z,.095,.008,2.4,yaw);}}
       }
     }else if(['river','stream','canal','drain','ditch'].includes(t.waterway)){
       const width=numberTag(t.width)||({river:12,canal:8,stream:2.4,drain:1.5,ditch:1}[t.waterway]);
@@ -203,10 +225,12 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
       const floors=Math.min(18,Math.floor((height-minHeight-1)/3.05)),orientation=Math.sign(polygonArea(polygon))||1;
       for(let i=0;i<polygon.length;i++){
         const a=polygon[i],b=polygon[(i+1)%polygon.length],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz);if(len<3)continue;
-        const columns=Math.min(25,Math.floor((len-1.1)/3)),nx=dz/len*orientation,nz=-dx/len*orientation;
+        const columns=Math.min(25,Math.floor((len-1.1)/3)),nx=dz/len*orientation,nz=-dx/len*orientation,yaw=Math.atan2(dx,dz)-Math.PI/2;
+        if(Math.hypot(center.x,center.z)<180){const x=(a.x+b.x)/2+nx*.025,z=(a.z+b.z)/2+nz*.025;instance(unitBox,sillMat,x,baseY+height-minHeight-.12,z,len,.2,.14,yaw);instance(unitBox,roof,x,baseY+.18,z,len,.35,.1,yaw);}
         for(let col=0;col<columns&&windowCount<10000;col++)for(let floor=0;floor<floors&&windowCount<10000;floor++){
           const ratio=(col+1)/(columns+1),x=a.x+dx*ratio+nx*.035,z=a.z+dz*ratio+nz*.035;
-          instance(unitBox,windowMat,x,baseY+1.8+floor*3.05,z,Math.min(1.4,len/(columns+1)*.56),1.35,.075,Math.atan2(dx,dz)-Math.PI/2);windowCount++;
+          const w=Math.min(1.4,len/(columns+1)*.56),y=baseY+1.8+floor*3.05;instance(unitBox,windowMat,x,y,z,w,1.35,.075,yaw);windowCount++;
+          if(Math.hypot(x,z)<125&&detailedWindowCount<2400){const tx=dx/len,tz=dz/len,fx=x+nx*.055,fz=z+nz*.055;for(const side of [-1,1]){instance(unitBox,frameMat,fx+tx*side*(w/2+.025),y,fz+tz*side*(w/2+.025),.065,1.48,.12,yaw);instance(unitBox,frameMat,fx,y+side*.71,fz,w+.12,.065,.12,yaw);}instance(unitBox,frameMat,fx,y,fz,.035,1.35,.1,yaw);instance(unitBox,sillMat,x+nx*.105,y-.77,z+nz*.105,w+.25,.1,.25,yaw);detailedWindowCount++;}
         }
       }
     }
@@ -221,12 +245,16 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
       interactables.push({id:'door-'+record.id,kind:'door',title:record.name,subtitle:'建物に入る（室内はゲーム用の再現）',position:new THREE.Vector3(entrance.x,terrainHeight(entrance.x,entrance.z),entrance.z),buildingId:record.id,interiorId:record.type,radius:3.3});
       // A restrained door insert communicates the interactable position without inventing signage.
       const doorX=entrance.edge.x+entrance.normal.x*.045,doorZ=entrance.edge.z+entrance.normal.z*.045;
-      instance(unitBox,railMat,doorX,terrainHeight(doorX,doorZ)+1.2,doorZ,.96,2.35,.08,Math.atan2(entrance.normal.x,entrance.normal.z));
+      const yaw=Math.atan2(entrance.normal.x,entrance.normal.z),y=terrainHeight(doorX,doorZ),nx=entrance.normal.x,nz=entrance.normal.z,tx=nz,tz=-nx;
+      instance(unitBox,railMat,doorX,y+1.2,doorZ,1.08,2.4,.12,yaw);
+      instance(unitBox,windowMat,doorX+nx*.075,y+1.28,doorZ+nz*.075,.86,2.08,.04,yaw);
+      instance(unitBox,frameMat,doorX+tx*.28+nx*.13,y+1.05,doorZ+tz*.28+nz*.13,.035,.36,.065,yaw);
+      instance(unitBox,sillMat,doorX+nx*.12,y+.05,doorZ+nz*.12,1.22,.1,.34,yaw);
     }
   }
   // Mapped trees plus modest visual vegetation only inside mapped green areas.
   function tree(x,z,id,scale=1){
-    const y=terrainHeight(x,z),h=3.2*scale;
+    const y=terrainHeight(x,z),h=3.2*scale;treeRecords.push({x,z,scale,seed:hashId(id),canopyY:h+1.05*scale});
     instance(unitCylinder,trunkMat,x,y+h/2,z,.12*scale,h,.12*scale);
     instance(unitSphere,leafMat,x,y+h+1.05*scale,z,1.65*scale,1.6*scale,1.55*scale);
     instance(unitSphere,leafMat,x+.65*scale,y+h+.7*scale,z-.4*scale,1.15*scale,1.15*scale,1.2*scale);
@@ -277,29 +305,35 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   ];
   if(offset>.5)notes.push(`取得した現在地が建物・水域内に重なるため、開始位置を約${Math.round(offset)}m先の屋外へ移しています。元の現在地は地図の印で示します。`);
   if(!buildings.length&&!mapFeatures.roads.length)notes.push('この範囲の道路・建物は地図に記録されていないか、取得範囲に含まれていません。');
-  let disposed=false;
+  const traffic=createTraffic(THREE,{roads:mapFeatures.roads,colliders,terrainHeight:(x,z)=>terrainHeight(x,z)+.06,bounds,quality:'high',leftHandTraffic:latitude>=24&&latitude<=46&&longitude>=122&&longitude<=146});
+  group.add(traffic.group);interactables.push(...traffic.interactables);
+  const vegetation=createVegetationDetail(THREE,{trees:treeRecords,heightAt:terrainHeight,quality:'high'});group.add(vegetation.group);
+  notes.push(traffic.sourceInfo.note);
+  let observer={x:spawn.x,z:spawn.z},disposed=false;
   const sourceInfo={
     source:'OpenStreetMap',attribution:'© OpenStreetMap contributors',licenseUrl:'https://www.openstreetmap.org/copyright',endpoint:ENDPOINT,
-    dataTimestamp:data.osm3s?.timestamp_osm_base||null,coverageMeters:radius,buildingCount:buildings.length,roadCount:mapFeatures.roads.length,areaCount,
+    dataTimestamp:data.osm3s?.timestamp_osm_base||null,coverageMeters:radius,radius,buildingCount:buildings.length,roadCount:mapFeatures.roads.length,areaCount,
     mappedHeightCount,inferredHeightCount,terrain:terrain?'elevation':'flat',terrainSource,spawnOffsetMeters:offset,origin:{x:0,z:0},
-    facades:'procedural',interiors:'game templates',vegetation:'mapped trees and procedural planting within mapped green areas',note:notes.join(' '),cached:false
+    traffic:traffic.sourceInfo,rendering:'PBR surfaces, smooth canopies and nearby leaf geometry',facades:'procedural',roadMarkings:'procedural decoration, not observed road markings',interiors:'game templates',vegetation:'mapped trees and procedural planting within mapped green areas',note:notes.join(' '),cached:false
   };
-  function dispose(){if(disposed)return;disposed=true;group.removeFromParent();group.clear();for(const geo of resources.geometries)geo.dispose();for(const mat of resources.materials)mat.dispose();for(const t of resources.textures)t.dispose();}
-  function update(dt,hour=12){if(disposed)return;windowMat.emissiveIntensity=hour<6||hour>=18?.34:.08;}
-  return {group,colliders,interactables,buildings,bounds,spawn,update,label:'現在地の街',geo:{latitude,longitude},toGeo,terrainHeight,sourceInfo,dispose,real:true,mapFeatures,originMarker:{x:0,z:0,spawnOffsetMeters:offset}};
+  function dispose(){if(disposed)return;disposed=true;traffic.dispose();vegetation.dispose();library.dispose();group.removeFromParent();group.clear();for(const geo of resources.geometries)geo.dispose();for(const mat of resources.materials)mat.dispose();for(const t of resources.textures)t.dispose();}
+  function update(dt,hour=12,focus){if(disposed)return;if(focus&&Number.isFinite(focus.x)&&Number.isFinite(focus.z))observer=focus;windowMat.emissiveIntensity=hour<6||hour>=18?.34:.08;traffic.update(dt,hour,observer);vegetation.update(observer);}
+  function setQuality(tier){library.setQuality(tier);for(const child of group.children)if(child.isMesh)library.updateGeometry(child);traffic.setQuality(tier);vegetation.setQuality(tier);}
+  update(0,12,observer);
+  return {group,colliders,interactables,buildings,bounds,spawn,update,radius,label:'現在地の街',geo:{latitude,longitude},toGeo,terrainHeight,sourceInfo,dispose,setQuality,trafficStats:traffic.getStats,trafficSnapshot:traffic.snapshot,real:true,mapFeatures,originMarker:{x:0,z:0,spawnOffsetMeters:offset}};
 }
 
-function validateOptions({latitude,longitude,radius=450,terrain}={}){
+function validateOptions({latitude,longitude,radius=250,terrain}={}){
   if(!Number.isFinite(latitude)||!Number.isFinite(longitude)||latitude < -85||latitude > 85||longitude < -180||longitude > 180)throw new Error('有効な緯度・経度を指定してください。極域はこの表示に対応していません。');
-  return {latitude,longitude,radius:Math.round(Math.max(100,Math.min(450,Number.isFinite(radius)?radius:450))),terrain};
+  return {latitude,longitude,radius:Math.round(Math.max(100,Math.min(450,Number.isFinite(radius)?radius:250))),terrain};
 }
 function readCache(key){
-  try{const rows=JSON.parse(localStorage.getItem(CACHE_KEY)||'[]');return rows.find(r=>r.key===key&&Date.now()-r.savedAt<CACHE_AGE&&Array.isArray(r.data?.elements))?.data||null;}catch{return null;}
+  try{const rows=JSON.parse(localStorage.getItem(CACHE_KEY)||'[]');return rows.find(r=>r.key===key&&Date.now()-r.savedAt<CACHE_AGE&&Array.isArray(r.data?.elements))||null;}catch{return null;}
 }
-function writeCache(key,data){
+function writeCache(key,data,source={}){
   try{
     let rows=JSON.parse(localStorage.getItem(CACHE_KEY)||'[]').filter(r=>r.key!==key&&Date.now()-r.savedAt<CACHE_AGE);
-    rows.unshift({key,savedAt:Date.now(),data});rows=rows.slice(0,4);
+    rows.unshift({key,savedAt:Date.now(),data,...source});rows=rows.slice(0,4);
     while(rows.length){try{localStorage.setItem(CACHE_KEY,JSON.stringify(rows));break;}catch{rows.pop();}}
   }catch{/* A blocked or full local store does not prevent the requested game session. */}
 }
