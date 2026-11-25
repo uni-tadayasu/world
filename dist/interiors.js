@@ -1,5 +1,7 @@
+import {createMaterialLibrary} from './materials.js';
 /** Hand-built, human-scale interiors for MACHI LIFE. */
 export function createInterior(THREE, id) {
+  const library=createMaterialLibrary(THREE,{quality:'high'});
   const group = new THREE.Group();
   group.name = `interior-${id}`;
   const colliders = [], interactables = [];
@@ -7,18 +9,18 @@ export function createInterior(THREE, id) {
   const label = labels[id] || labels.home;
   const matCache = new Map();
   const boxGeo = new THREE.BoxGeometry(1,1,1);
-  const cylGeo = new THREE.CylinderGeometry(1,1,1,20);
-  const sphereGeo = new THREE.SphereGeometry(1,20,14);
+  const cylGeo = library.cylinder();
+  const sphereGeo = library.sphere();
   const m = (color, roughness=.7, metalness=0) => {
     const key = `${color}-${roughness}-${metalness}`;
     if(!matCache.has(key))matCache.set(key,new THREE.MeshStandardMaterial({color,roughness,metalness}));
     return matCache.get(key);
   };
   function box(x,y,z,w,h,d,material,shadow=true){
-    const o=new THREE.Mesh(boxGeo,typeof material==='number'?m(material):material);o.position.set(x,y,z);o.scale.set(w,h,d);o.castShadow=shadow;o.receiveShadow=true;group.add(o);return o;
+    const rounded=Math.max(w,h,d)<6&&Math.min(w,h,d)>=.04;const o=new THREE.Mesh(rounded?library.roundedBox(w,h,d,Math.min(.07,Math.min(w,h,d)*.15)):boxGeo,typeof material==='number'?m(material):material);o.position.set(x,y,z);if(!rounded)o.scale.set(w,h,d);o.castShadow=shadow;o.receiveShadow=true;group.add(o);return o;
   }
   function cyl(x,y,z,r,h,material,rTop=1){
-    const geo=rTop===1?cylGeo:new THREE.CylinderGeometry(r*rTop,r,h,24);
+    const geo=rTop===1?cylGeo:new THREE.CylinderGeometry(r*rTop,r,h,48);
     const o=new THREE.Mesh(geo,typeof material==='number'?m(material):material);o.position.set(x,y,z);if(rTop===1)o.scale.set(r,h,r);o.castShadow=true;o.receiveShadow=true;group.add(o);return o;
   }
   function sphere(x,y,z,rx,ry,rz,material){const o=new THREE.Mesh(sphereGeo,typeof material==='number'?m(material):material);o.position.set(x,y,z);o.scale.set(rx,ry,rz);o.castShadow=true;group.add(o);return o;}
@@ -60,10 +62,10 @@ export function createInterior(THREE, id) {
   function wallLight(x,z,rot=0){const o=box(x,2.7,z,.18,.52,.16,brass);o.rotation.y=rot;const g=box(x,2.7,z+.09,.1,.36,.08,lightMat);g.rotation.y=rot;}
   function table(x,z,w=1.8,d=1.0,y=.76,material=wood){box(x,y,z,w,.095,d,material);for(const dx of [-w/2+.12,w/2-.12])for(const dz of [-d/2+.12,d/2-.12])box(x+dx,y/2,z+dz,.07,y,.07,dark);collider(x,z,w,d);}
   function chair(x,z,rot=0,color=0x98734e){
-    const cg=new THREE.Group();const add=(xx,yy,zz,w,h,d,mat)=>{const o=new THREE.Mesh(boxGeo,mat);o.position.set(xx,yy,zz);o.scale.set(w,h,d);o.castShadow=true;cg.add(o);};
+    const cg=new THREE.Group();const add=(xx,yy,zz,w,h,d,mat)=>{const o=new THREE.Mesh(library.roundedBox(w,h,d,Math.min(.045,Math.min(w,h,d)*.15)),mat);o.position.set(xx,yy,zz);o.castShadow=true;cg.add(o);};
     const seat=m(color,.85);add(0,.47,0,.47,.07,.48,seat);add(0,.77,-.215,.47,.54,.065,seat);for(const xx of [-.18,.18])for(const zz of [-.18,.18])add(xx,.23,zz,.045,.47,.045,dark);cg.position.set(x,0,z);cg.rotation.y=rot;group.add(cg);
   }
-  function mug(x,y,z,color=0xe9e3d7){cyl(x,y+.065,z,.075,.13,m(color,.35));cyl(x,y+.132,z,.062,.005,m(0x3b261b));const ring=new THREE.Mesh(new THREE.TorusGeometry(.045,.012,8,16),m(color,.4));ring.position.set(x+.078,y+.07,z);group.add(ring);}
+  function mug(x,y,z,color=0xe9e3d7){cyl(x,y+.065,z,.075,.13,m(color,.35));cyl(x,y+.132,z,.062,.005,m(0x3b261b));const ring=new THREE.Mesh(new THREE.TorusGeometry(.045,.012,16,48),m(color,.4));ring.position.set(x+.078,y+.07,z);group.add(ring);}
   function book(x,y,z,w=.15,h=.45,color=0x697b73,rot=0){const o=box(x,y+h/2,z,w,h,.29,m(color,.8));o.rotation.y=rot;box(x,y+h*.77,z+.148,w*.72,.012,.006,ivory,false);}
   function shelf(x,z,w=2,h=2.8,d=.55,rot=0,fill='books'){
     const g=new THREE.Group();const old=group.children.length;
@@ -194,7 +196,7 @@ export function createInterior(THREE, id) {
     art(7.84,2.45,-3.5,3.7,2.3,1,-Math.PI/2);art(7.84,2.45,3.5,3.7,2.3,0,-Math.PI/2);
     for(const x of [-4.65,0,4.65]){panel(x===0?'余白のある風景':'静かな時間','MACHI COLLECTION',x,1.05,-8.77,1.2,.22);const l=new THREE.PointLight(0xfff3da,4,7,2);l.position.set(x,3.7,-6.4);group.add(l);}
     // An original sculptural loop on a stone plinth.
-    box(0,.55,-2.2,1.55,1.1,1.55,m(0xbfc3b9,.9));const sculpture=new THREE.Mesh(new THREE.TorusKnotGeometry(.65,.12,96,14,2,3),m(0xb59b70,.27,.6));sculpture.position.set(0,1.85,-2.2);sculpture.rotation.set(.2,.5,.1);sculpture.castShadow=true;group.add(sculpture);collider(0,-2.2,1.7,1.7);
+    box(0,.55,-2.2,1.55,1.1,1.55,m(0xbfc3b9,.9));const sculpture=new THREE.Mesh(new THREE.TorusKnotGeometry(.65,.12,192,28,2,3),m(0xb59b70,.27,.6));sculpture.position.set(0,1.85,-2.2);sculpture.rotation.set(.2,.5,.1);sculpture.castShadow=true;group.add(sculpture);collider(0,-2.2,1.7,1.7);
     panel('巡るかたち','BRASS / 2026',0,.79,-1.395,1.05,.25);
     // Benches leave the view to the exhibition open.
     for(const x of [-3.4,3.4]){box(x,.48,3.0,2.8,.12,.7,wood);for(const dx of [-1.05,1.05])box(x+dx,.23,3.0,.18,.46,.6,m(0x899187));collider(x,3.0,2.8,.75);}
@@ -215,12 +217,14 @@ export function createInterior(THREE, id) {
     for(const x of [-4.4,1.9])for(const z of [-3,1])pendant(x,z,3.2);
     art(-7.84,2.6,6.2,1.7,1.4,2,Math.PI/2);action('books','本を手に取る','新しい物語と、ゆっくり過ごす時間',1.0,5.3,2.7);
   }
+  library.apply(wood,'wood');library.apply(walnut,'wood');library.apply(floorWood,'wood');library.apply(wall,'plaster');library.apply(tile,'paving');library.apply(fabric,'fabric');
+  for(const mat of matCache.values())library.apply(mat,mat.metalness>.35?'metal':mat.roughness>.9?'fabric':'stone');
   // Furnishing is static. Consolidating repeated pieces preserves the detail
   // while keeping hundreds of products/books inexpensive on mobile GPUs.
   group.updateMatrixWorld(true);
   const batches=new Map();
   group.traverse(o=>{
-    if(!o.isMesh || o.material.transparent || ![boxGeo,cylGeo,sphereGeo].includes(o.geometry))return;
+    if(!o.isMesh || o.material.transparent || (!o.geometry.userData.qualityShape&&![boxGeo,cylGeo,sphereGeo].includes(o.geometry)))return;
     const key=`${o.geometry.uuid}:${o.material.uuid}:${o.castShadow}`;
     if(!batches.has(key))batches.set(key,[]);
     batches.get(key).push(o);
@@ -232,5 +236,9 @@ export function createInterior(THREE, id) {
     pieces.forEach((piece,index)=>{batch.setMatrixAt(index,piece.matrixWorld);piece.removeFromParent();});
     batch.instanceMatrix.needsUpdate=true;batch.computeBoundingSphere();group.add(batch);
   }
-  return {group,colliders,interactables,spawn:{x:0,z:7,yaw:0},bounds:{minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5},label};
+  let disposed=false;const lights=[];group.traverse(o=>{if(o.isPointLight){o.userData.baseIntensity=o.intensity;lights.push(o);}});
+  function setQuality(tier){library.setQuality(tier);group.traverse(o=>{if(o.isMesh)library.updateGeometry(o);});const limit=tier==='low'?2:tier==='medium'?4:12;lights.forEach((light,index)=>{light.visible=index<limit;});}
+  function update(){}
+  function dispose(){if(disposed)return;disposed=true;const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture)textures.add(value);}});for(const g of geometries)g.dispose();for(const m of materials)m.dispose();for(const t of textures)t.dispose();library.dispose();group.removeFromParent();group.clear();}
+  return {group,colliders,interactables,setQuality,update,dispose,spawn:{x:0,z:7,yaw:0},bounds:{minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5},label};
 }

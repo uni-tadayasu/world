@@ -1,5 +1,8 @@
+import {createMaterialLibrary,createVegetationDetail} from './materials.js';
+import {createTraffic} from './traffic.js';
 /* MACHI LIFE — handcrafted, human-scale exterior. No network assets. */
 export function createWorld(THREE) {
+  const library=createMaterialLibrary(THREE,{quality:'high'}),treeRecords=[];
   const group = new THREE.Group();
   group.name = 'ひかり町';
   const colliders = [], interactables = [], buildings = [];
@@ -9,12 +12,12 @@ export function createWorld(THREE) {
   const v = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
   const m = new THREE.Matrix4(), e = new THREE.Euler();
   const boxGeometry = new THREE.BoxGeometry(1,1,1);
-  const sphereGeometry = new THREE.SphereGeometry(1,18,12);
-  const cylinderGeometry = new THREE.CylinderGeometry(1,1,1,16);
+  const sphereGeometry = library.sphere(true);
+  const cylinderGeometry = library.cylinder();
   let seed = 31919;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
   const mats = {};
-  function material(name,color,opts={}) { return mats[name] = new THREE.MeshStandardMaterial({color,roughness:.78,metalness:0,...opts}); }
+  function material(name,color,opts={}) { const Physical=(opts.metalness||0)>.15||(opts.roughness??1)<.4;return mats[name] = new (Physical?THREE.MeshPhysicalMaterial:THREE.MeshStandardMaterial)({color,roughness:.78,metalness:0,...(Physical?{clearcoat:.45,clearcoatRoughness:.22}:{}),...opts}); }
   function canvasTexture(w,h,paint) {
     const c = document.createElement('canvas'); c.width=w; c.height=h;
     paint(c.getContext('2d'),w,h);
@@ -71,7 +74,7 @@ export function createWorld(THREE) {
     let b=batches.get(key);if(!b){b={geo,mat,matrices:[],cast};batches.set(key,b);}
     v.set(...pos); s.set(...scale); e.set(...rotation); q.setFromEuler(e);m.compose(v,q,s);b.matrices.push(m.clone());
   }
-  const box=(x,y,z,w,h,d,mat,ry=0,cast=true)=>batch(boxGeometry,mat,[x,y,z],[w,h,d],[0,ry,0],cast);
+  const box=(x,y,z,w,h,d,mat,ry=0,cast=true)=>{const rounded=cast&&w<=3&&d<=3&&h<=2.4&&Math.min(w,h,d)>=.06&&[wood,cedar,dark,metal,bronze,concrete].includes(mat);batch(rounded?library.roundedBox(w,h,d,Math.min(.05,Math.min(w,h,d)*.13)):boxGeometry,mat,[x,y,z],rounded?[1,1,1]:[w,h,d],[0,ry,0],cast);};
   const sphere=(x,y,z,sx,sy,sz,mat)=>batch(sphereGeometry,mat,[x,y,z],[sx,sy,sz]);
   const cyl=(x,y,z,r,h,mat,rx=0,rz=0)=>batch(cylinderGeometry,mat,[x,y,z],[r,h,r],[rx,0,rz]);
   const collider=(x,z,w,d)=>colliders.push({minX:x-w/2,maxX:x+w/2,minZ:z-d/2,maxZ:z+d/2});
@@ -115,7 +118,7 @@ export function createWorld(THREE) {
   }
 
   function tree(x,z,size=1,variant=0){
-    const height=3.5*size;
+    const height=3.5*size;treeRecords.push({x,z,scale:size,seed:Math.round((x+200)*97+(z+200)*31),canopyY:height+size});
     cyl(x,height/2,z,.13*size,height,bark);
     for(let i=0;i<3;i++){let a=i*2.1+variant;let bx=x+Math.cos(a)*.45*size,bz=z+Math.sin(a)*.45*size;cyl(bx,height*.82,bz,.055*size,height*.47,bark,Math.sin(a)*.45,Math.cos(a)*.45);}
     sphere(x,height+1*size,z,1.7*size,1.6*size,1.6*size,leafMats[variant%5]);
@@ -313,10 +316,10 @@ export function createWorld(THREE) {
     const bike=new THREE.Group();bike.position.set(bx,0,bz);bike.rotation.y=-.25;
     const tyreMat=black,frameMat=[green,metal,bronze][i];
     for(const dx of [-.7,.7]){
-      const wheel=new THREE.Mesh(new THREE.TorusGeometry(.36,.035,7,24),tyreMat);wheel.position.set(dx,.5,0);bike.add(wheel);
-      const rim=new THREE.Mesh(new THREE.TorusGeometry(.33,.009,5,24),metal);rim.position.copy(wheel.position);bike.add(rim);
+      const wheel=new THREE.Mesh(new THREE.TorusGeometry(.36,.035,14,64),tyreMat);wheel.position.set(dx,.5,0);bike.add(wheel);
+      const rim=new THREE.Mesh(new THREE.TorusGeometry(.33,.009,10,64),metal);rim.position.copy(wheel.position);bike.add(rim);
     }
-    function rod(ax,ay,bx2,by){const a=new THREE.Vector3(ax,ay,0),b=new THREE.Vector3(bx2,by,0),mesh=new THREE.Mesh(new THREE.CylinderGeometry(.018,.018,a.distanceTo(b),7),frameMat);mesh.position.copy(a.add(b).multiplyScalar(.5));mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),new THREE.Vector3(bx2-ax,by-ay,0).normalize());bike.add(mesh);}
+    function rod(ax,ay,bx2,by){const a=new THREE.Vector3(ax,ay,0),b=new THREE.Vector3(bx2,by,0),mesh=new THREE.Mesh(new THREE.CylinderGeometry(.018,.018,a.distanceTo(b),16),frameMat);mesh.position.copy(a.add(b).multiplyScalar(.5));mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),new THREE.Vector3(bx2-ax,by-ay,0).normalize());bike.add(mesh);}
     rod(-.7,.5,-.23,1);rod(-.23,1,0,.52);rod(0,.52,-.7,.5);rod(-.23,1,.44,1);rod(.44,1,0,.52);rod(.44,1,.7,.5);rod(.44,1,.42,1.2);
     const seat=new THREE.Mesh(new THREE.BoxGeometry(.3,.065,.16),black);seat.position.set(-.25,1.08,0);bike.add(seat);group.add(bike);
   }
@@ -328,69 +331,26 @@ export function createWorld(THREE) {
     mesh.castShadow=b.cast;mesh.receiveShadow=true;mesh.instanceMatrix.needsUpdate=true;mesh.computeBoundingSphere();group.add(mesh);
   }
 
-  const vehicles=[];
-  const carPaints=['#dddace','#496868','#b8b3a4','#3e505a'];
-  const carGeos={body:new THREE.BoxGeometry(1.65,.62,3.55),cabin:new THREE.BoxGeometry(1.46,.65,1.85),glass:new THREE.BoxGeometry(1.48,.46,1.7),wheel:new THREE.CylinderGeometry(.31,.31,.19,16)};
-  function makeCar(index,x,z,direction){
-    const c=new THREE.Group();c.position.set(x,0,z);c.rotation.y=direction<0?Math.PI:0;
-    const paint=new THREE.MeshStandardMaterial({color:carPaints[index%carPaints.length],roughness:.28,metalness:.35});
-    function mesh(geo,mat,xx,y,zz){const o=new THREE.Mesh(geo,mat);o.position.set(xx,y,zz);o.castShadow=true;o.receiveShadow=true;c.add(o);return o;}
-    mesh(carGeos.body,paint,0,.63,0);mesh(carGeos.glass,glass,0,1.13,-.12);mesh(carGeos.cabin,paint,0,1.17,-.12).scale.set(1,.13,1);
-    mesh(new THREE.BoxGeometry(1.5,.05,1.76),paint,0,1.43,-.12);
-    for(const xx of [-.74,.74])for(const zz of [-1.15,1.15]){const w=mesh(carGeos.wheel,black,xx,.37,zz);w.rotation.z=Math.PI/2;}
-    for(const xx of [-.55,.55]){mesh(new THREE.BoxGeometry(.35,.14,.055),warmLight,xx,.73,1.79);mesh(new THREE.BoxGeometry(.3,.12,.055),material('taillight-'+index+'-'+xx,'#9c4c43'),xx,.74,-1.79);}
-    mesh(new THREE.BoxGeometry(.4,.17,.04),pale,0,.5,1.8);mesh(new THREE.BoxGeometry(1.2,.16,.04),dark,0,.51,1.8);
-    group.add(c);vehicles.push({group:c,speed:5.2+index*.8,direction,z});
+  for(const [name,mat] of Object.entries(mats)){
+    const kind=name==='asphalt'?'asphalt':name==='sidewalk'?'paving':name==='brick'?'brick':name==='wood'||name==='cedar'?'wood':name==='bark'?'bark':name.startsWith('leaf')?'leaf':name==='grass'?'grass':['glass','windowLit','storefront'].includes(name)?'glass':['metal','dark','black','bronze'].includes(name)?'metal':'stone';
+    library.apply(mat,kind);
   }
-  makeCar(0,-3.6,14,1);makeCar(1,3.5,-13,-1);makeCar(2,-3.6,-70,1);makeCar(3,3.5,80,-1);
-
-  // Rounded, articulated residents move at a pedestrian pace along the sidewalks.
-  const residents=[];
-  const skin=new THREE.MeshStandardMaterial({color:'#c79c7e',roughness:.92});
-  const hair=new THREE.MeshStandardMaterial({color:'#37312d',roughness:1});
-  const faceGeo=new THREE.SphereGeometry(.13,14,10);
-  const torsoGeo=new THREE.CapsuleGeometry(.19,.34,5,10);
-  const limbGeo=new THREE.CapsuleGeometry(.055,.39,4,8);
-  const pantsMat=new THREE.MeshStandardMaterial({color:'#465050',roughness:.96});
-  const shoeGeo=new THREE.BoxGeometry(.11,.09,.24);
-  function person(index,x,z,stationary=false){
-    const p=new THREE.Group();p.position.set(x,.12,z);
-    const shirt=new THREE.MeshStandardMaterial({color:['#c2b497','#577b74','#7c8c99','#b2aa91','#aa836d','#666c66'][index%6],roughness:1});
-    const add=(geo,mat,xx,y,zz)=>{const o=new THREE.Mesh(geo,mat);o.position.set(xx,y,zz);o.castShadow=true;p.add(o);return o;};
-    add(torsoGeo,shirt,0,1.08,0);
-    add(faceGeo,skin,0,1.57,0);const cap=add(new THREE.SphereGeometry(.14,14,8,0,Math.PI*2,0,Math.PI*.6),hair,0,1.6,-.015);cap.rotation.x=-.15;
-    const nose=add(new THREE.SphereGeometry(.027,8,6),skin,0,1.56,.125);
-    const armL=add(limbGeo,shirt,-.24,.99,0),armR=add(limbGeo,shirt,.24,.99,0);
-    const legL=add(limbGeo,pantsMat,-.1,.44,0),legR=add(limbGeo,pantsMat,.1,.44,0);
-    add(shoeGeo,black,-.1,.095,.045);add(shoeGeo,black,.1,.095,.045);
-    const talk={id:'resident-'+index,kind:'npc',title:['街の住人・あおい','街の住人・蓮','街の住人・はるか','街の住人・悠斗','街の住人・さくら','街の住人・大地'][index%6],subtitle:'声をかける',position:new THREE.Vector3(x,0,z),radius:2.5};
-    group.add(p);interactables.push(talk);residents.push({group:p,x,z,stationary,speed:.5+(index%3)*.12,direction:index%2?1:-1,phase:index*1.5,armL,armR,legL,legR,talk});
-  }
-  person(0,9.6,-12);person(1,-10.5,-49);person(2,10,-75);person(3,-10.6,27);person(4,10.5,77);person(5,55,24,true);person(6,71,-5,true);
-
-  let elapsed=0,lastNight=-1;
-  function update(dt,hour=10){
-    elapsed+=Math.min(dt,.1);
-    for(const c of vehicles){
-      const signalPhase=(elapsed%22);let speed=c.speed;
-      // Cars slow briefly before the two marked crossings, then continue.
-      for(const crossing of [-28,48]){const ahead=(crossing-c.group.position.z)*c.direction;if(ahead>8&&ahead<14&&signalPhase<5)speed*=.04;}
-      c.group.position.z+=speed*dt*c.direction;
-      if(c.group.position.z>105)c.group.position.z=-105;if(c.group.position.z<-105)c.group.position.z=105;
-    }
-    for(const r of residents){
-      if(!r.stationary){
-        r.group.position.z+=r.speed*dt*r.direction;if(r.group.position.z>92)r.direction=-1;if(r.group.position.z<-92)r.direction=1;
-        r.group.rotation.y=r.direction>0?0:Math.PI;
-        const a=Math.sin(elapsed*4+r.phase)*.35;r.armL.rotation.x=a;r.armR.rotation.x=-a;r.legL.rotation.x=-a;r.legR.rotation.x=a;
-        r.group.position.y=.12+Math.abs(Math.sin(elapsed*4+r.phase))*.015;
-      }else{r.group.rotation.y=Math.sin(elapsed*.13+r.phase)*.3;r.group.position.y=.12+Math.sin(elapsed*1.3+r.phase)*.005;}
-      r.talk.position.set(r.group.position.x,0,r.group.position.z);
-    }
+  const traffic=createTraffic(THREE,{roads:[{points:[{x:0,z:-99},{x:0,z:99}],width:14,type:'residential'},...[-28,48].map(z=>({points:[{x:-86,z},{x:86,z}],width:12,type:'residential'}))],colliders,bounds,terrainHeight:(x,z)=>Math.abs(x)<7||[-28,48].some(c=>Math.abs(z-c)<6)?.035:.14,leftHandTraffic:true,quality:'high'});
+  group.add(traffic.group);interactables.push(...traffic.interactables);
+  const vegetation=createVegetationDetail(THREE,{trees:treeRecords,heightAt:()=>0,quality:'high'});group.add(vegetation.group);
+  let elapsed=0,lastNight=-1,observer={x:spawn.x,z:spawn.z},disposed=false;
+  function update(dt,hour=10,focus){
+    if(disposed)return;dt=Number.isFinite(dt)?Math.max(0,Math.min(dt,.1)):0;elapsed+=dt;
+    if(focus&&Number.isFinite(focus.x)&&Number.isFinite(focus.z))observer=focus;
+    traffic.update(dt,hour,observer);vegetation.update(observer);
     for(let i=0;i<ripples.length;i++){const scale=1+Math.sin(elapsed*1.4-i)*.06;ripples[i].scale.set(scale,scale,1);ripples[i].material.opacity=.22+Math.sin(elapsed*1.2-i)*.1;}
     jet.scale.y=1+Math.sin(elapsed*2)*.05;
     const night=hour<6||hour>=18?1:0;
     if(night!==lastNight){warmLight.emissiveIntensity=night?2:.5;windowLit.emissiveIntensity=night?.8:.07;glass.emissiveIntensity=night?.25:.16;lastNight=night;}
   }
-  return {group,colliders,interactables,buildings,bounds,spawn,update};
+  function setQuality(tier){library.setQuality(tier);for(const child of group.children)if(child!==traffic.group&&child!==vegetation.group)child.traverse(o=>{if(o.isMesh)library.updateGeometry(o);});traffic.setQuality(tier);vegetation.setQuality(tier);}
+  function dispose(){if(disposed)return;disposed=true;traffic.dispose();vegetation.dispose();const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture)textures.add(value);}});for(const geo of geometries)geo.dispose();for(const mat of materials)mat.dispose();for(const texture of textures)texture.dispose();library.dispose();group.removeFromParent();group.clear();}
+  const sourceInfo={traffic:traffic.sourceInfo,rendering:'PBR surfaces, rounded street furniture and distance-limited leaf detail'};
+  update(0,10,observer);
+  return {group,colliders,interactables,buildings,bounds,spawn,update,setQuality,dispose,sourceInfo,trafficStats:traffic.getStats,trafficSnapshot:traffic.snapshot};
 }

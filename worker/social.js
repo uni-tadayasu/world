@@ -3,7 +3,9 @@
 const PREFIX='/api/social';
 const VOICE_TTL=45000;
 const SIGNAL_TTL=120000;
-const PUBLIC_FIELDS='id,code,name';
+const PUBLIC_FIELDS='id,code,name,tagline,bio,title,accent,avatar_icon,show_name,profile_version,updated_at';
+const PROFILE_TITLES=new Set(['','街の住人','気ままな旅人','散歩好き','カフェ日和','本のある暮らし','部屋づくり好き','のんびり暮らし','街の探索者']);
+const PROFILE_ICONS=new Set(['leaf','coffee','book','home','sun','moon','star','compass']);
 const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin'};
 
 class HttpError extends Error{
@@ -15,7 +17,9 @@ const uuid=()=>crypto.randomUUID();
 const first=(db,sql,...values)=>db.prepare(sql).bind(...values).first();
 const all=async(db,sql,...values)=>(await db.prepare(sql).bind(...values).all()).results||[];
 const run=(db,sql,...values)=>db.prepare(sql).bind(...values).run();
-const publicUser=row=>({id:row.id,code:row.code,name:row.name});
+const publicUser=row=>({id:row.id,code:row.code,name:Array.from(String(row.name||'旅人')).slice(0,24).join(''),title:PROFILE_TITLES.has(row.title)?row.title:'街の住人',accent:/^#[0-9a-f]{6}$/i.test(row.accent||'')?row.accent:'#2e6b54',avatarIcon:PROFILE_ICONS.has(row.avatar_icon)?row.avatar_icon:'leaf'});
+const publicProfile=row=>({...publicUser(row),tagline:row.tagline||'',bio:row.bio||''});
+const ownProfile=row=>({...publicProfile(row),showName:row.show_name!==0,version:Number(row.profile_version||0),updatedAt:Number(row.updated_at||0)});
 const pair=(a,b)=>a<b?[a,b]:[b,a];
 const changed=result=>Number(result?.meta?.changes||0)>0;
 const blockedSQL='NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?))';
@@ -53,12 +57,12 @@ async function body(request,maxBytes=16384){
 }
 async function profile(db,authId){
   let user=await first(db,`SELECT ${PUBLIC_FIELDS} FROM profiles WHERE auth_id=?`,authId);
-  if(user)return publicUser(user);
+  if(user)return ownProfile(user);
   for(let attempt=0;attempt<3;attempt++){
     const now=Date.now();
     await run(db,'INSERT OR IGNORE INTO profiles(id,auth_id,code,name,created_at,updated_at) VALUES(?,?,?,?,?,?)',uuid(),authId,'M-'+uuid().replace(/-/g,'').slice(0,10).toUpperCase(),'旅人',now,now);
     user=await first(db,`SELECT ${PUBLIC_FIELDS} FROM profiles WHERE auth_id=?`,authId);
-    if(user)return publicUser(user);
+    if(user)return ownProfile(user);
   }
   fail(503,'プロフィールを作成できませんでした。もう一度お試しください。','profile_unavailable');
 }
@@ -90,7 +94,7 @@ function recipientAccess(channel,to){
   return {sql:'1',params:[]};
 }
 function message(row,channel,userId){
-  return {id:row.id,channel,text:row.text,createdAt:row.created_at,user:{id:row.sender_id,code:row.code,name:row.name},mine:row.sender_id===userId};
+  return {id:row.id,channel,text:row.text,createdAt:row.created_at,user:publicUser({...row,id:row.sender_id}),mine:row.sender_id===userId};
 }
 function organization(row){return {id:row.id,name:row.name,description:row.description,ownerId:row.owner_id,memberCount:Number(row.member_count||0),joined:!!row.role,role:row.role||null};}
 async function listOrganizations(db,userId,joinedOnly=false){
@@ -99,18 +103,18 @@ async function listOrganizations(db,userId,joinedOnly=false){
 }
 async function state(db,user){
   const [rows,organizations,blocks]=await Promise.all([
-    all(db,`SELECT f.*,p.id AS other_id,p.code,p.name FROM friends f JOIN profiles p ON p.id=CASE WHEN f.user_a=? THEN f.user_b ELSE f.user_a END WHERE f.user_a=? OR f.user_b=? ORDER BY f.updated_at DESC LIMIT 200`,user.id,user.id,user.id),
+    all(db,`SELECT f.*,p.id AS other_id,p.code,p.name,p.title,p.accent,p.avatar_icon FROM friends f JOIN profiles p ON p.id=CASE WHEN f.user_a=? THEN f.user_b ELSE f.user_a END WHERE f.user_a=? OR f.user_b=? ORDER BY f.updated_at DESC LIMIT 200`,user.id,user.id,user.id),
     listOrganizations(db,user.id,true),
     all(db,`SELECT p.id,p.code,p.name FROM blocks b JOIN profiles p ON p.id=b.blocked_id WHERE b.blocker_id=? ORDER BY b.created_at DESC LIMIT 100`,user.id),
   ]);
   const friends={incoming:[],outgoing:[],accepted:[]};
-  for(const row of rows){const entry={requestId:row.id,user:{id:row.other_id,code:row.code,name:row.name},createdAt:row.created_at};friends[row.status==='accepted'?'accepted':row.recipient_id===user.id?'incoming':'outgoing'].push(entry);}
+  for(const row of rows){const entry={requestId:row.id,user:publicUser({...row,id:row.other_id}),createdAt:row.created_at};friends[row.status==='accepted'?'accepted':row.recipient_id===user.id?'incoming':'outgoing'].push(entry);}
   return {user,friends,organizations,blocks};
 }
 async function voicePeers(db,channel,userId,now){
   const membership=channel.kind==='org'?'AND EXISTS(SELECT 1 FROM members m WHERE m.org_id=? AND m.user_id=v.user_id)':channel.kind==='dm'?'AND (v.user_id=? OR v.user_id=?)':'';
   const membershipParams=channel.kind==='org'?[channel.orgId]:channel.kind==='dm'?[userId,channel.peerId]:[];
-  const rows=await all(db,`SELECT p.id,p.code,p.name FROM voice_members v JOIN profiles p ON p.id=v.user_id WHERE v.channel=? AND v.updated_at>=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=v.user_id) OR (b.blocker_id=v.user_id AND b.blocked_id=?)) ${membership} ORDER BY v.user_id LIMIT 4`,channel.key,now-VOICE_TTL,userId,userId,...membershipParams);
+  const rows=await all(db,`SELECT p.id,p.code,p.name,p.title,p.accent,p.avatar_icon FROM voice_members v JOIN profiles p ON p.id=v.user_id WHERE v.channel=? AND v.updated_at>=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=v.user_id) OR (b.blocker_id=v.user_id AND b.blocked_id=?)) ${membership} ORDER BY v.user_id LIMIT 4`,channel.key,now-VOICE_TTL,userId,userId,...membershipParams);
   return rows.map(publicUser);
 }
 async function cleanupSignals(db,now){
@@ -193,15 +197,37 @@ export async function handleSocial(request,env){
       await run(db,'INSERT INTO player_belongings(user_id,data_json,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET data_json=excluded.data_json,updated_at=excluded.updated_at',user.id,JSON.stringify(items),now);
       return json({ok:true,items,updatedAt:now});
     }
+    if(path==='/profile'&&method==='GET'){
+      const requested=url.searchParams.get('userId');
+      if(!requested||requested===user.id)return json({user,isSelf:true,signedIn:true});
+      const id=identifier(requested,'プロフィールID');
+      const other=await first(db,`SELECT ${PUBLIC_FIELDS} FROM profiles WHERE id=? AND ${blockedSQL}`,id,...blockedParams(user.id,id));
+      if(!other)fail(404,'このプロフィールは表示できません。','profile_not_found');
+      return json({user:publicProfile(other),isSelf:false});
+    }
     if(path==='/profile'&&method==='POST'){
-      const data=await body(request);const name=string(data.name,'表示名',2,32);
-      await run(db,'UPDATE profiles SET name=?,updated_at=? WHERE id=?',name,now,user.id);
-      return json({user:{...user,name}});
+      const data=await body(request);
+      // The expected ID is a session-change guard, never an ownership selector.
+      if(data.expectedUserId!==undefined&&data.expectedUserId!==user.id)fail(409,'ログイン中のアカウントが変わりました。現在のプロフィールを確認してください。','profile_identity_changed');
+      const expected=data.expectedVersion===undefined?user.version:data.expectedVersion;
+      if(!Number.isSafeInteger(expected)||expected<0)fail(400,'プロフィールの保存状態を確認できません。','invalid_profile_version');
+      const next={name:user.name,tagline:user.tagline,bio:user.bio,title:user.title,accent:user.accent,avatarIcon:user.avatarIcon,showName:user.showName};
+      if(data.name!==undefined)next.name=string(typeof data.name==='string'?data.name.replace(/\s+/g,' '):data.name,'表示名',1,24);
+      if(data.tagline!==undefined)next.tagline=string(typeof data.tagline==='string'?data.tagline.replace(/\s+/g,' '):data.tagline,'ひとこと',0,60);
+      if(data.bio!==undefined)next.bio=string(typeof data.bio==='string'?data.bio.replace(/\r\n?/g,'\n'):data.bio,'自己紹介',0,300);
+      if(data.title!==undefined){if(!PROFILE_TITLES.has(data.title))fail(400,'用意された称号から選んでください。','invalid_profile_title');next.title=data.title;}
+      if(data.accent!==undefined){if(typeof data.accent!=='string'||!/^#[0-9a-f]{6}$/i.test(data.accent))fail(400,'アクセントカラーが正しくありません。','invalid_profile_accent');next.accent=data.accent.toLowerCase();}
+      if(data.avatarIcon!==undefined){if(!PROFILE_ICONS.has(data.avatarIcon))fail(400,'用意されたアイコンから選んでください。','invalid_profile_icon');next.avatarIcon=data.avatarIcon;}
+      if(data.showName!==undefined){if(typeof data.showName!=='boolean')fail(400,'頭上ネームの設定が正しくありません。','invalid_profile_visibility');next.showName=data.showName;}
+      const result=await run(db,'UPDATE profiles SET name=?,tagline=?,bio=?,title=?,accent=?,avatar_icon=?,show_name=?,profile_version=profile_version+1,updated_at=? WHERE id=? AND profile_version=?',next.name,next.tagline,next.bio,next.title,next.accent,next.avatarIcon,next.showName?1:0,now,user.id,expected);
+      const saved=await first(db,`SELECT ${PUBLIC_FIELDS} FROM profiles WHERE id=?`,user.id);
+      if(!changed(result))return json({error:'別の画面でプロフィールが更新されています。最新の内容を確認してから保存してください。',code:'profile_conflict',user:ownProfile(saved)},409);
+      return json({user:ownProfile(saved)});
     }
     if(path==='/state'&&method==='GET')return json(await state(db,user));
     if(path==='/users'&&method==='GET'){
       const q=string(url.searchParams.get('q'),'検索する名前またはコード',3,64);
-      const users=await all(db,`SELECT p.id,p.code,p.name FROM profiles p WHERE p.id<>? AND (UPPER(p.code)=UPPER(?) OR p.name=?) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=p.id) OR (b.blocker_id=p.id AND b.blocked_id=?)) ORDER BY p.created_at LIMIT 20`,user.id,q,q,user.id,user.id);
+      const users=await all(db,`SELECT p.id,p.code,p.name,p.title,p.accent,p.avatar_icon FROM profiles p WHERE p.id<>? AND (UPPER(p.code)=UPPER(?) OR p.name=?) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=p.id) OR (b.blocker_id=p.id AND b.blocked_id=?)) ORDER BY p.created_at LIMIT 20`,user.id,q,q,user.id,user.id);
       return json({users:users.map(publicUser)});
     }
     if(path==='/friends/request'&&method==='POST'){
@@ -274,12 +300,12 @@ export async function handleSocial(request,env){
     const membersMatch=path.match(/^\/organizations\/([A-Za-z0-9-]{1,80})\/members$/);
     if(membersMatch&&method==='GET'){
       const id=membersMatch[1];await authorizeChannel(db,'org:'+id,user.id);
-      const members=await all(db,'SELECT p.id,p.code,p.name,m.role FROM members m JOIN profiles p ON p.id=m.user_id WHERE m.org_id=? ORDER BY CASE WHEN m.role=\'owner\' THEN 0 ELSE 1 END,m.created_at,p.id LIMIT 100',id);
-      return json({members});
+      const members=await all(db,'SELECT p.id,p.code,p.name,p.title,p.accent,p.avatar_icon,m.role FROM members m JOIN profiles p ON p.id=m.user_id WHERE m.org_id=? ORDER BY CASE WHEN m.role=\'owner\' THEN 0 ELSE 1 END,m.created_at,p.id LIMIT 100',id);
+      return json({members:members.map(member=>({...publicUser(member),role:member.role}))});
     }
     if(path==='/messages'&&method==='GET'){
       const channel=await authorizeChannel(db,url.searchParams.get('channel')||'global',user.id);const since=numericId(url.searchParams.get('since'));
-      const rows=await all(db,`SELECT m.*,p.code,p.name FROM messages m JOIN profiles p ON p.id=m.sender_id WHERE m.channel=? AND m.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=m.sender_id) OR (b.blocker_id=m.sender_id AND b.blocked_id=?)) ORDER BY m.id ${since?'ASC':'DESC'} LIMIT ${since?100:50}`,channel.key,since,user.id,user.id);
+      const rows=await all(db,`SELECT m.*,p.code,p.name,p.title,p.accent,p.avatar_icon FROM messages m JOIN profiles p ON p.id=m.sender_id WHERE m.channel=? AND m.id>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker_id=? AND b.blocked_id=m.sender_id) OR (b.blocker_id=m.sender_id AND b.blocked_id=?)) ORDER BY m.id ${since?'ASC':'DESC'} LIMIT ${since?100:50}`,channel.key,since,user.id,user.id);
       if(!since)rows.reverse();
       return json({messages:rows.map(row=>message(row,channel.raw,user.id))});
     }
@@ -290,7 +316,7 @@ export async function handleSocial(request,env){
         await authorizeChannel(db,channel.raw,user.id);
         fail(429,'送信が続いています。30秒ほど待ってから送信してください。','message_rate_limit');
       }
-      const row=await first(db,'SELECT m.*,p.code,p.name FROM messages m JOIN profiles p ON p.id=m.sender_id WHERE m.id=?',result.meta.last_row_id);
+      const row=await first(db,'SELECT m.*,p.code,p.name,p.title,p.accent,p.avatar_icon FROM messages m JOIN profiles p ON p.id=m.sender_id WHERE m.id=?',result.meta.last_row_id);
       return json({message:message(row,channel.raw,user.id)},201);
     }
     if(path==='/block'&&(method==='POST'||method==='DELETE')){
