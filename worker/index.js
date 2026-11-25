@@ -27,6 +27,8 @@ export default {
     }
     if(!['GET','HEAD'].includes(request.method))return new Response('Method not allowed',{status:405,headers:{...SECURITY,Allow:'GET, HEAD'}});
     let path;try{path=decodeURIComponent(url.pathname);}catch{return new Response('Bad request',{status:400});}
+    // Versioned module URLs keep relative imports together after an update.
+    path=path.replace(/^\/_assets\/[a-f0-9]{16}(?=\/)/,'');
     if(path==='/'||path==='/index.html')path='/index.html';
     if(STATIC_MEDIA[path]){
       const media=STATIC_MEDIA[path],range=request.headers.get('Range');
