@@ -1,5 +1,7 @@
 // Reward-account foundation only. Production HTTP never constructs a provider.
 // Game money, save files and client-provided balances are not a funding source.
+import {handleSandboxExchangeRequest} from './exchange-sandbox.js';
+import {createRewardTreasuryService,REWARD_TREASURY_POLICY} from './reward-treasury.js';
 const MAX_POINTS=1000000000000,MAX_SATOSHIS=2100000000000000,MAX_QUOTE_MS=15*60000;
 const UNAVAILABLE='暗号資産への交換は準備中です。現在、実際の交換・送金はできません。';
 const RESPONSE_HEADERS={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin'};
@@ -125,15 +127,24 @@ export function createExchangeService({db,provider=null,now=()=>Date.now(),id=()
 }
 
 /** Called only after social.js has enforced device identity, CSRF and owner guard. */
-export async function handleExchangeRequest({db,user,path,method,now=Date.now()}={}){
+export async function handleExchangeRequest({db,user,path,method,now=Date.now(),data}={}){
   const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:RESPONSE_HEADERS});
   try{
+    if(path==='/exchange/sandbox'||path.startsWith('/exchange/sandbox/'))return await handleSandboxExchangeRequest({db,user,path,method,now,data});
     // Deliberate production gate: env flags, client flags and account balances
     // cannot supply an adapter or enable sending. No outgoing request exists.
     const exchange=createExchangeService({db,provider:null,now:()=>now});
     if(method==='GET'&&path==='/exchange'){
-      const [balance,requests]=await Promise.all([exchange.getBalance(user.id),exchange.getRequests(user.id)]);
-      return json({userId:user.id,available:false,mode:'preparing',asset:'BTC',balance,requests,message:UNAVAILABLE});
+      const treasury=createRewardTreasuryService({db,verifier:null,now:()=>now});
+      const [balance,requests,funding]=await Promise.all([exchange.getBalance(user.id),exchange.getRequests(user.id),treasury.getState()]);
+      const rule=REWARD_TREASURY_POLICY;
+      const program={name:'MACHI REWARDS',region:rule.country,minimumAge:rule.minimumAge,policyStatus:rule.status,policyVersion:rule.version,pointsPerSatoshi:1/rule.satoshisPerMR,dailyRewardPoints:rule.dailyRewardMR,minimumWithdrawalPoints:rule.minWithdrawalMR,maximumWithdrawalPoints:rule.maxWithdrawalMR,timezone:rule.timezone,treasury:funding,canPay:false,readiness:[
+        {code:'funding',status:funding.confirmedSatoshis>0?'recorded':'missing',message:funding.confirmedSatoshis>0?'台帳上の原資記録があります。実際の未使用残高は未接続です。':'実送金用の原資は未入金です。検証資金は原資に含めません。'},
+        {code:'provider',status:'missing',message:'実際の入金検証・送金サービスは未接続です。'},
+        {code:'operation',status:'missing',message:'提供地域に必要な運営条件と受給資格の確認は未完了です。'},
+        {code:'destination',status:'deferred',message:'送金先は後から設定します。現在は入力不要です。'}
+      ]};
+      return json({userId:user.id,available:false,mode:'preparing',asset:'BTC',balance,requests,program,message:UNAVAILABLE});
     }
     if(method==='GET'&&path==='/exchange/requests')return json({userId:user.id,requests:await exchange.getRequests(user.id)});
     if(method==='POST'&&(path==='/exchange/quote'||path==='/exchange/requests'||/^\/exchange\/requests\/[^/]+\/cancel$/.test(path)))return json({error:UNAVAILABLE,code:'exchange_unavailable',available:false,asset:'BTC'},503);

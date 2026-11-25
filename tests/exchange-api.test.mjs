@@ -8,7 +8,7 @@ import {createExchangeService} from '../worker/exchange.js';
 
 function fixture(t){
   const db=new DatabaseSync(':memory:');db.exec('PRAGMA foreign_keys=ON');t.after(()=>db.close());
-  for(const file of ['0000_social','0001_profile','0002_device_sessions','0003_exchange'])db.exec(readFileSync(new URL('../drizzle/'+file+'.sql',import.meta.url),'utf8'));
+  for(const file of ['0000_social','0001_profile','0002_device_sessions','0003_exchange','0004_exchange_sandbox','0005_reward_treasury'])db.exec(readFileSync(new URL('../drizzle/'+file+'.sql',import.meta.url),'utf8'));
   const prepare=(sql,values=[])=>({sql,values,bind:(...next)=>prepare(sql,next),async first(){return db.prepare(sql).get(...values)||null;},async all(){return {results:db.prepare(sql).all(...values)};},async run(){const result=db.prepare(sql).run(...values);return {meta:{changes:Number(result.changes),last_row_id:Number(result.lastInsertRowid)}};}});
   const database={prepare,async batch(statements){db.exec('BEGIN');try{const results=await Promise.all(statements.map(s=>s.run()));db.exec('COMMIT');return results;}catch(error){db.exec('ROLLBACK');throw error;}}};
   // A string flag or env-bound object cannot activate the production handler.
@@ -47,6 +47,50 @@ test('production starts at zero and stays unavailable despite flags or client ga
   }
   for(const route of ['/exchange/credit','/exchange/reward','/exchange/provider/webhook'])assert.equal((await f.post(a,route,{points:12000,verified:true,confirmed:true})).status,404);
   assert.equal(f.count('exchange_accounts'),0);assert.equal(f.count('exchange_reward_events'),0);assert.equal(f.count('exchange_quotes'),0);assert.equal(f.count('exchange_requests'),0);assert.equal(f.count('exchange_ledger'),0);
+});
+
+test('public sandbox completes the rehearsal while live balances and real funding remain zero',async t=>{
+  const f=fixture(t),a=await f.connect();
+  const initial=await f.api('/exchange',{cookie:a.cookie});
+  assert.equal(initial.data.program.canPay,false);assert.equal(initial.data.program.policyStatus,'draft');
+  assert.equal(initial.data.program.region,'JP');assert.equal(initial.data.program.minimumAge,18);
+  assert.equal(initial.data.program.treasury.confirmedSatoshis,0);
+  assert.equal(initial.data.program.readiness.find(x=>x.code==='destination').status,'deferred');
+  const refill=await f.post(a,'/exchange/sandbox/refill',{idempotencyKey:'public-refill-001',money:Infinity,points:999999999,mode:'live'});
+  assert.equal(refill.status,200);assert.equal(refill.data.balance.availablePoints,10000);
+  assert.equal(refill.data.mode,'sandbox');assert.equal(refill.data.network,'simulation');assert.equal(refill.data.realValue,false);
+  const quote=await f.post(a,'/exchange/sandbox/quote',{points:1000});assert.equal(quote.status,200);
+  const body={quoteId:quote.data.quote.id,idempotencyKey:'public-request-001'};
+  const created=await f.post(a,'/exchange/sandbox/requests',body);assert.equal(created.status,200);
+  const replay=await f.post(a,'/exchange/sandbox/requests',body);assert.equal(replay.data.request.id,created.data.request.id);assert.equal(replay.data.duplicate,true);
+  const finished=await f.post(a,'/exchange/sandbox/requests/'+created.data.request.id+'/complete');
+  assert.equal(finished.status,200);assert.equal(finished.data.request.status,'simulated_paid');assert.equal(finished.data.balance.confirmedPoints,9000);assert.equal(finished.data.balance.reservedPoints,0);
+  const live=await f.api('/exchange',{cookie:a.cookie});assert.equal(live.data.balance.confirmedPoints,0);assert.equal(live.data.program.treasury.confirmedSatoshis,0);assert.equal(live.data.available,false);
+  for(const table of ['exchange_accounts','exchange_reward_events','exchange_quotes','exchange_requests','exchange_ledger'])assert.equal(f.count(table),0,table+' must remain unchanged');
+  assert.equal((await f.post(a,'/exchange/requests',{quoteId:quote.data.quote.id,idempotencyKey:'no-mode-crossing'})).status,503);
+});
+
+test('sandbox HTTP retains cookie, owner and origin protection for every mutation',async t=>{
+  const f=fixture(t),a=await f.connect(),b=await f.connect();
+  assert.equal((await f.api('/exchange/sandbox')).status,401);
+  assert.equal((await f.api('/exchange/sandbox/refill',{cookie:a.cookie,method:'POST',data:{idempotencyKey:'missing-owner'}})).status,409);
+  assert.equal((await f.post(a,'/exchange/sandbox/refill',{idempotencyKey:'cross-origin-001'},{Origin:'https://attacker.test'})).status,403);
+  assert.equal((await f.post(a,'/exchange/sandbox/refill',{idempotencyKey:'wrong-owner-001'},{'X-Machi-User-Id':b.id})).status,409);
+  await f.post(a,'/exchange/sandbox/refill',{idempotencyKey:'owner-refill-001'});
+  const q=await f.post(a,'/exchange/sandbox/quote',{points:1000});
+  assert.equal((await f.post(b,'/exchange/sandbox/requests',{quoteId:q.data.quote.id,idempotencyKey:'other-owner-001'})).status,404);
+  const own=await f.post(a,'/exchange/sandbox/requests',{quoteId:q.data.quote.id,idempotencyKey:'own-request-001'});
+  assert.equal((await f.post(b,'/exchange/sandbox/requests/'+own.data.request.id+'/complete')).status,404);
+  const other=await f.api('/exchange/sandbox?userId='+a.id,{cookie:b.cookie});assert.equal(other.data.userId,b.id);assert.equal(other.data.balance.confirmedPoints,0);
+});
+
+test('sandbox write attempts are limited independently of valueless balances',async t=>{
+  t.mock.method(Date,'now',()=>1795615200000);
+  const f=fixture(t),a=await f.connect();
+  for(let i=0;i<60;i++)assert.equal((await f.post(a,'/exchange/sandbox/not-an-action')).status,404);
+  const limited=await f.post(a,'/exchange/sandbox/refill',{idempotencyKey:'limited-refill-001'});
+  assert.equal(limited.status,429);assert.equal(limited.data.code,'exchange_rate_limit');
+  assert.equal((await f.api('/exchange/sandbox',{cookie:a.cookie})).status,200,'reading remains available to reconcile previous actions');
 });
 
 test('HTTP keeps existing cookie identity, expected owner and CSRF guard; owner query cannot select another balance',async t=>{
