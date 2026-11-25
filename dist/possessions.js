@@ -1,5 +1,6 @@
 import {readDeviceSession} from './device-session.js';
 import {isOnlineHost} from './site-config.js';
+import {createObjectCollisionIndex,colliderFromObject} from './object-collisions.js';
 const CATALOG=[{type:'plant',name:'小さな観葉植物',price:300,color:'#64875b',w:.8,d:.8},{type:'chair',name:'木とスチールの椅子',price:500,color:'#a88764',w:.75,d:.8},{type:'lamp',name:'真鍮のフロアライト',price:850,color:'#c4aa72',w:.65,d:.65},{type:'table',name:'丸いサイドテーブル',price:1200,color:'#957856',w:1.3,d:1.3},{type:'shelf',name:'暮らしの小さな本棚',price:1500,color:'#8e785e',w:1.3,d:.55}];
 const TYPES=new Set(['sofa','table','chair','bed','desk','shelf','plant','lamp','rug','cabinet']);
 const PALETTE=['#64875b','#9d7b59','#d1c6ae','#647e8b','#a67365','#3c5149'];
@@ -7,8 +8,9 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&
 const money=value=>'¥'+value.toLocaleString('ja-JP');
 function valid(items){return Array.isArray(items)?items.slice(0,100).filter(item=>item&&typeof item.id==='string'&&item.id.length<=80&&TYPES.has(item.type)&&typeof item.name==='string'&&item.name.length<=50&&/^#[a-f\d]{6}$/i.test(item.color)&&Number.isFinite(item.condition)&&typeof item.stored==='boolean').map(item=>({id:item.id,type:item.type,name:item.name,color:item.color,condition:Math.max(0,Math.min(100,item.condition)),stored:item.stored})):[];}
 
-export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=async()=>false}={}){
-  const group=new THREE.Group(),colliders=[],interactables=[];group.name='個人用ゲーム内フリーマーケット';
+export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=async()=>false,onSound=()=>{}}={}){
+  const group=new THREE.Group(),colliders=[],interactables=[],audioSources=[];group.name='個人用ゲーム内フリーマーケット';
+  const collisionIndex=createObjectCollisionIndex({cellSize:4});
   let items=[],profileId=null,cacheDirty=false,cacheLocked=false,memoryDirty=false,placements=[],busy=false,disposed=false,syncPromise=null,syncing=false;
   const geometries={box:new THREE.BoxGeometry(1,1,1),cylinder:new THREE.CylinderGeometry(1,1,1,32),sphere:new THREE.SphereGeometry(1,20,14)};
   const canonical=isOnlineHost();
@@ -25,7 +27,9 @@ export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=asy
     if(!canonical||!profileId){if(cached)memoryDirty=false;return;}
     try{await api('/belongings','POST',{items,expectedUserId:profileId});writeCache(false);memoryDirty=false;}catch(error){toast((error.name==='AbortError'?'保存の接続がタイムアウトしました。':error.message)+' 現在のプレイには変更を反映しています。持ち物画面から再同期できます。');}
   }
-  function clearModels(){const materials=new Set();group.traverse(object=>{if(object.isMesh)materials.add(object.material);});group.clear();for(const material of materials)material.dispose();colliders.length=0;interactables.length=0;}
+  function clearModels(){const materials=new Set();group.traverse(object=>{if(object.isMesh)materials.add(object.material);});group.clear();for(const material of materials)material.dispose();colliders.length=0;collisionIndex.replaceStatic(colliders);interactables.length=0;audioSources.length=0;}
+  function soundPosition(placement){return {x:placement.x,y:placement.y+({plant:.8,chair:.55,lamp:1.5,table:.75,shelf:.8}[placement.offer.type]??.6),z:placement.z};}
+  function emitSound(item,action){if(disposed||item.stored)return;const placement=placements.find(p=>p.offer.type===item.type);if(!placement)return;try{onSound({kind:item.type==='shelf'?'bookshelf':item.type,position:soundPosition(placement),action});}catch(_){/* Sound failure must not prevent a saved change. */}}
   function model(type,color,condition){
     const root=new THREE.Group();const tint=new THREE.Color(color).lerp(new THREE.Color('#8c897e'),(100-condition)/230);
     const paint=new THREE.MeshStandardMaterial({color:tint,roughness:.45+(100-condition)/220}),metal=new THREE.MeshStandardMaterial({color:'#384741',roughness:.38,metalness:.65}),wood=new THREE.MeshStandardMaterial({color:'#b58a65',roughness:.8});
@@ -43,10 +47,11 @@ export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=asy
     if(disposed)return;clearModels();
     for(const placement of placements){const offer=placement.offer,owned=items.find(item=>item.type===offer.type);if(owned?.stored)continue;
       const object=model(offer.type,owned?.color||offer.color,owned?.condition??70);object.position.set(placement.x,placement.y,placement.z);object.rotation.y=placement.rotation;group.add(object);
-      const halfW=Math.abs(Math.cos(placement.rotation))*offer.w/2+Math.abs(Math.sin(placement.rotation))*offer.d/2,halfD=Math.abs(Math.sin(placement.rotation))*offer.w/2+Math.abs(Math.cos(placement.rotation))*offer.d/2;
-      colliders.push({minX:placement.x-halfW,maxX:placement.x+halfW,minZ:placement.z-halfD,maxZ:placement.z+halfD});
-      interactables.push({id:'flea:'+offer.type,kind:'possession',title:owned?'あなたの'+owned.name:'ゲーム内フリーマーケット',subtitle:owned?'手入れ・色替え・保管':offer.name+' · '+money(offer.price),position:new THREE.Vector3(placement.x,placement.y,placement.z),radius:2.6});
+      const soundKind=offer.type==='shelf'?'bookshelf':offer.type,soundAt=soundPosition(placement);audioSources.push({id:'possession:'+offer.type,kind:soundKind,...soundAt,radius:4,ambient:false});
+      const collider=colliderFromObject(THREE,object,{id:'possession:'+offer.type,type:offer.type});if(collider)colliders.push(collider);
+      interactables.push({id:'flea:'+offer.type,kind:'possession',title:owned?'あなたの'+owned.name:'ゲーム内フリーマーケット',subtitle:owned?'手入れ・色替え・保管':offer.name+' · '+money(offer.price),position:new THREE.Vector3(placement.x,placement.y,placement.z),radius:2.6,soundKind,soundPosition:new THREE.Vector3(soundAt.x,soundAt.y,soundAt.z)});
     }
+    collisionIndex.replaceStatic(colliders);
   }
   function attachWorld(world,isBlocked=()=>false){
     const spawn=world.spawn||{x:0,z:0},bounds=world.bounds;placements=[];clearModels();
@@ -68,14 +73,14 @@ export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=asy
     const name=owned?.name||offer.name;const state=owned?`状態 ${Math.round(owned.condition)} / 100 · ${owned.stored?'保管中':'街に置いています'}`:`購入価格 ${money(offer.price)} · 状態 70 / 100`;
     const html=`<p>街に並ぶ、あなた専用のゲームオブジェクトです。実際の店舗・所有物とは関係ありません。</p><div class="model-info"><div><strong>${esc(name)}</strong><small>${state}</small></div></div>${owned?`<div class="form-row"><label for="object-name">名前</label><input id="object-name" type="text" maxlength="50" value="${esc(name)}"></div><div class="button-row"><button class="secondary-btn" data-own="rename">名前を変える</button><button class="secondary-btn" data-own="care">${owned.type==='plant'?'水やりと手入れ':'掃除する'} · 体力 −2</button><button class="secondary-btn" data-own="repair" ${owned.condition>=100?'disabled':''}>修理する · ¥150</button></div><p class="section-label">色を替える · ¥50</p><div class="button-row">${PALETTE.map(color=>`<button class="secondary-btn" data-paint="${color}" aria-label="${color}に色を替える" style="background:${color};width:40px;min-width:40px;padding:10px;border:3px solid ${color===owned.color?'#193e37':'white'}"></button>`).join('')}</div><div class="button-row"><button class="secondary-btn" data-own="pickup" ${owned.stored?'disabled':''}>持ち物に保管する</button><button class="primary-btn" data-own="place">自宅に置く</button></div>`:`<p>購入すると、色替え・手入れ・保管ができます。自宅に持ち帰って配置することもできます。</p><button class="primary-btn" data-own="buy" ${syncing?'disabled':''}>${money(offer.price)}で購入する</button>`}<p class="legal-note">${profileId?'このブラウザに紐づく、あなたの持ち物として保存します。':'通信がつながるまでは、このブラウザに保存します。持ち物画面から通信を再確認できます。'}</p>`;
     const element=panel(owned?'あなたの持ち物':'ゲーム内フリーマーケット',html);
-    element.querySelectorAll('[data-paint]').forEach(button=>button.onclick=()=>{if(!owned||!canSpend(50))return;mutate(()=>{owned.color=button.dataset.paint;life.state.money-=50;toast('色を替えました。');},()=>openItem(owned.id));});
+    element.querySelectorAll('[data-paint]').forEach(button=>button.onclick=()=>{if(!owned||!canSpend(50))return;mutate(()=>{owned.color=button.dataset.paint;life.state.money-=50;emitSound(owned,'paint');toast('色を替えました。');},()=>openItem(owned.id));});
     element.querySelectorAll('[data-own]').forEach(button=>button.onclick=()=>{
-      const action=button.dataset.own;if(action==='buy'){if(!canSpend(offer.price))return;if(items.length>=100){toast('持ち物は100点までです。自宅に配置して整理できます。');return;}mutate(()=>{const item={id:crypto.randomUUID(),type:offer.type,name:offer.name,color:offer.color,condition:70,stored:false};items.push(item);life.state.money-=offer.price;toast(name+'を購入しました。');},()=>openItem('flea:'+offer.type));return;}
+      const action=button.dataset.own;if(action==='buy'){if(!canSpend(offer.price))return;if(items.length>=100){toast('持ち物は100点までです。自宅に配置して整理できます。');return;}mutate(()=>{const item={id:crypto.randomUUID(),type:offer.type,name:offer.name,color:offer.color,condition:70,stored:false};items.push(item);life.state.money-=offer.price;emitSound(item,'touch');toast(name+'を購入しました。');},()=>openItem('flea:'+offer.type));return;}
       if(!owned)return;
       if(action==='rename'){const nameInput=element.querySelector('#object-name').value.trim().slice(0,50);if(!nameInput){toast('名前を入力してください。');return;}mutate(()=>{owned.name=nameInput;},()=>openItem(owned.id));}
-      if(action==='care'){if(life.state.energy<2){toast('少し休んでから手入れしましょう。');return;}mutate(()=>{owned.condition=Math.min(100,owned.condition+12);life.state.energy=Math.max(0,life.state.energy-2);life.state.hunger=Math.max(0,life.state.hunger-1);life.state.mood=Math.min(100,life.state.mood+(owned.type==='plant'?5:3));toast('手入れをして、気分もすっきりしました。');},()=>openItem(owned.id));}
-      if(action==='repair'&&canSpend(150))mutate(()=>{owned.condition=100;life.state.money-=150;toast('修理して、きれいになりました。');},()=>openItem(owned.id));
-      if(action==='pickup')mutate(()=>{owned.stored=true;toast('持ち物に保管しました。');},()=>openItem(owned.id));
+      if(action==='care'){if(life.state.energy<2){toast('少し休んでから手入れしましょう。');return;}mutate(()=>{owned.condition=Math.min(100,owned.condition+12);life.state.energy=Math.max(0,life.state.energy-2);life.state.hunger=Math.max(0,life.state.hunger-1);life.state.mood=Math.min(100,life.state.mood+(owned.type==='plant'?5:3));emitSound(owned,owned.type==='plant'?'water':'clean');toast('手入れをして、気分もすっきりしました。');},()=>openItem(owned.id));}
+      if(action==='repair'&&canSpend(150))mutate(()=>{owned.condition=100;life.state.money-=150;emitSound(owned,'repair');toast('修理して、きれいになりました。');},()=>openItem(owned.id));
+      if(action==='pickup')mutate(()=>{emitSound(owned,'pickup');owned.stored=true;toast('持ち物に保管しました。');},()=>openItem(owned.id));
       if(action==='place')mutate(async()=>{if(!await onPlace({...owned})){toast('自宅に入ってから、持ち物画面で配置してください。');return;}items=items.filter(item=>item.id!==owned.id);toast('自宅に置きました。部屋づくりで移動や色替えができます。');},openInventory);
     });
   }
@@ -88,7 +93,7 @@ export function createPossessions(THREE,{life,toast=()=>{},openPanel,onPlace=asy
     const pending=(async()=>{try{if(!canonical){if(memoryDirty)await persist();refresh();return {local:true};}const me=await readDeviceSession(),nextId=me.signedIn?me.user.id:null;if(nextId!==profileId){profileId=nextId;readCache();memoryDirty=false;}else if(!memoryDirty)readCache();if(profileId){if(cacheDirty||memoryDirty){await api('/belongings','POST',{items,expectedUserId:profileId});writeCache(false);memoryDirty=false;}else{const saved=await api('/belongings');if(saved.userId!==profileId)throw new Error('このブラウザの保存先が変わりました。もう一度、通信を再確認してください。');items=valid(saved.items);writeCache(false);}}else if(memoryDirty)await persist();refresh();return {signedIn:!!profileId};}catch(error){toast((error.name==='AbortError'?'持ち物の同期がタイムアウトしました。':error.message)+' 現在のプレイで続けます。');refresh();return {error:true};}})();syncPromise=pending;
     try{return await pending;}finally{syncing=false;if(syncPromise===pending)syncPromise=null;}
   }
-  function dispose(){disposed=true;for(const controller of controllers)controller.abort();clearModels();for(const geometry of Object.values(geometries))geometry.dispose();group.removeFromParent();}
+  function dispose(){disposed=true;for(const controller of controllers)controller.abort();clearModels();collisionIndex.dispose();for(const geometry of Object.values(geometries))geometry.dispose();group.removeFromParent();}
   readCache();
-  return {group,colliders,interactables,attachWorld,interact:openItem,openInventory,sync,dispose};
+  return {group,colliders,collisionIndex,interactables,getAudioSources:()=>audioSources,attachWorld,interact:openItem,openInventory,sync,dispose};
 }

@@ -1,19 +1,19 @@
 // Feet are expressed in world metres. Only explicitly registered walking surfaces
 // are queried; furniture, roofs and decorative meshes never become a floor.
-export function createCharacterController({sampleGround,isBlocked=()=>false,radius=.32,maxStep=.35,maxSlopeDegrees=50,gravity=18,jumpSpeed=5.4,snapDown=.22}={}){
+export function createCharacterController({sampleGround,isBlocked=()=>false,sweepVertical=null,radius=.32,height=1.75,maxStep=.35,maxSlopeDegrees=50,gravity=18,jumpSpeed=5.4,snapDown=.22}={}){
   if(typeof sampleGround!=='function')throw new TypeError('sampleGround is required');
   const slopeLimit=Math.cos(maxSlopeDegrees*Math.PI/180),skin=.002;
   const state={x:0,y:0,z:0,grounded:false,verticalVelocity:0,groundHeight:null,support:null,speed:0,distance:0,landed:false,jumped:false};
   let lastSafe={x:0,y:0,z:0};
-  function sample(x,z){
-    const ground=sampleGround(x,z);
+  function sample(x,z,feetY=state.y){
+    const ground=sampleGround(x,z,feetY);
     if(!ground||!Number.isFinite(ground.height))return null;
     return ground;
   }
   function walkable(ground){return ground&&(ground.normal?.y??1)>=slopeLimit;}
   function reset({x=0,y,z=0}={}){
     state.x=Number.isFinite(x)?x:0;state.z=Number.isFinite(z)?z:0;
-    const ground=sample(state.x,state.z);
+    const ground=sample(state.x,state.z,Number.isFinite(y)?y:0);
     state.y=Number.isFinite(y)?y:(ground?.height??0);
     state.grounded=Boolean(walkable(ground)&&Math.abs(state.y-ground.height)<.03);
     if(state.grounded)state.y=ground.height;
@@ -22,10 +22,13 @@ export function createCharacterController({sampleGround,isBlocked=()=>false,radi
     lastSafe={x:state.x,y:state.y,z:state.z};return state;
   }
   function advance(x,z){
-    if(isBlocked(x,z,radius))return false;
     const ground=sample(x,z);
+    const rise=ground?ground.height-state.y:0;
+    // Test the body's height after a legal step-up, so a low solid curb can be
+    // climbed while a tall tabletop or overhead obstruction still blocks it.
+    const candidateY=state.grounded&&walkable(ground)&&rise>0&&rise<=maxStep+skin?ground.height:state.y;
+    if(isBlocked(x,z,radius,candidateY,height))return false;
     if(ground){
-      const rise=ground.height-state.y;
       if(state.grounded){
         if(rise>maxStep+skin||!walkable(ground))return false;
         if(rise>=-snapDown){state.y=ground.height;state.support=ground;}
@@ -45,7 +48,12 @@ export function createCharacterController({sampleGround,isBlocked=()=>false,radi
     const count=Math.max(1,Math.ceil(dt/(1/120)),Math.ceil(Math.hypot(dx,dz)/(radius*.45))),h=dt/count;
     let travelled=0;
     for(let i=0;i<count;i++){
-      if(!state.grounded){state.verticalVelocity-=gravity*h;state.y+=state.verticalVelocity*h;}
+      if(!state.grounded){
+        state.verticalVelocity-=gravity*h;const fromY=state.y,toY=fromY+state.verticalVelocity*h;
+        const contact=sweepVertical?.({x:state.x,z:state.z,radius,height,fromY,toY});
+        state.y=contact?.hit&&Number.isFinite(contact.y)?contact.y:toY;
+        if(contact?.hit){state.verticalVelocity=0;if(contact.grounded){state.landed=true;state.grounded=true;}}
+      }
       const x=state.x,z=state.z;
       // Try the diagonal first to avoid axis-dependent slope speed; slide along
       // a wall if only one component is obstructed.

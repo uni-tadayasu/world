@@ -1,6 +1,7 @@
 /** A browser-owned home with a layout editor and anonymous device saves. */
 import {readDeviceSession} from './device-session.js';
 import {isOnlineHost} from './site-config.js';
+import {createObjectCollisionIndex,colliderFromObject} from './object-collisions.js';
 const TYPES={
   sofa:{name:'ソファ',w:2.7,d:1.1,color:'#7c9585'},table:{name:'テーブル',w:1.7,d:1,color:'#a17e55'},
   chair:{name:'チェア',w:.65,d:.7,color:'#b69d75'},bed:{name:'ベッド',w:1.65,d:2.3,color:'#d7d5bd'},
@@ -40,10 +41,11 @@ function sanitize(layout){
   }return result;
 }
 
-export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
+export async function createPlayerHome(THREE,{toast=()=>{},openPanel,onSound=()=>{}}={}){
   const group=new THREE.Group();group.name='自分の住まい';
   const shell=new THREE.Group(),furnishings=new THREE.Group();group.add(shell,furnishings);
   const colliders=[],interactables=[],bounds={minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5},spawn={x:0,z:7,yaw:0};
+  const collisionIndex=createObjectCollisionIndex({cellSize:2.5});
   const geometryCache=new Map(),baseMaterials=new Set(),itemMaterials=new Set();
   const mat=(color,extra={})=>{const m=new THREE.MeshStandardMaterial({color,roughness:.78,...extra});baseMaterials.add(m);return m;};
   const wood=mat('#9a7953'),dark=mat('#3f514a',{metalness:.28,roughness:.52}),ivory=mat('#e8e6d8'),metal=mat('#858f87',{metalness:.65,roughness:.35}),glass=mat('#a6c5bd',{emissive:'#a4c2bb',emissiveIntensity:.22,roughness:.35}),sinkMat=mat('#a8b4ac',{metalness:.7,roughness:.23});
@@ -51,6 +53,19 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   let layout=defaultLayout(),identity=null,scope='guest',readyForCloud=false,status='この端末に保存',statusError=false,dirty=false,revision=0,saveTimer=null,saving=null,syncPromise=null,disposed=false,initialized=false;
   let editor=null,canvas=null,selectedId=null,pendingType='sofa',mode='select',preview=null,confirmClear=false;
   let care={cleanliness:100,water:{},lamps:{}};
+  const audioSources=[],fixedAudio=[
+    {id:'home:entrance',kind:'door',x:0,y:1.4,z:8.58,radius:5,ambient:false},
+    {id:'home:fridge',kind:'fridge',x:-6.32,y:1.25,z:-7.88,radius:9,gain:.17,ambient:true},
+    {id:'home:stove',kind:'stove',x:-6.3,y:1.1,z:-6.6,radius:5,ambient:false},
+    {id:'home:faucet',kind:'faucet',x:-6.65,y:1.43,z:-4.75,radius:5,ambient:false},
+    {id:'home:kitchen',kind:'counter',x:-6.35,y:.99,z:-5.7,radius:5,ambient:false},
+    {id:'home:craft',kind:'table',x:2.8,y:.9,z:7.95,radius:5,ambient:false},
+    {id:'home:floor',kind:'floor',x:0,y:0,z:0,radius:12,ambient:false},
+    {id:'home:window-side',kind:'window',x:7.4,y:2.35,z:-.5,radius:4,ambient:false},
+    {id:'home:window-back',kind:'window',x:0,y:2.25,z:-8.4,radius:4,ambient:false}
+  ];
+  const sourceForItem=item=>({id:'home:item:'+item.id,kind:item.type==='shelf'?'bookshelf':item.type,x:item.x,y:({sofa:.55,table:.58,chair:.55,bed:.5,desk:.9,shelf:1,plant:.8,lamp:1.5,rug:.03,cabinet:.7})[item.type]??.5,z:item.z,radius:4,ambient:false});
+  function emitSound(item,action){if(disposed)return;const source=item?sourceForItem(item):{kind:'floor',x:0,y:.05,z:0};try{onSound({kind:source.kind,position:{x:source.x,y:source.y,z:source.z},action});}catch(_){/* Sound failure must not prevent a saved change. */}}
   const getKey=()=>scope==='guest'?'machi:home:v1:guest':`machi:home:v2:${scope}`;
   function geometry(key,build){if(!geometryCache.has(key))geometryCache.set(key,build());return geometryCache.get(key);}
   function rounded(w,h,d,r=.05){
@@ -86,6 +101,7 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   box(shell,-6.32,1.25,-7.88,1.95,2.5,.58,ivory);box(shell,-5.3,1.6,-7.88,.07,.53,.08,metal);box(shell,-5.3,.65,-7.88,.07,.5,.08,metal);
   box(shell,-7.28,2.6,-5.7,.22,1,3.7,wood);for(const z of [-6.9,-5.7,-4.5])box(shell,-7.14,2.6,z,.08,.88,1.08,ivory);
   box(shell,2.8,.9,7.95,1,.1,.7,wood);for(const x of [2.42,3.18])box(shell,x,.45,7.95,.06,.85,.06,dark);box(shell,2.8,1.2,8.05,.72,.48,.035,dark);box(shell,2.8,1.2,8.02,.62,.36,.015,glass);
+  const shellColliders=[];shell.traverse(object=>{if(!object.isMesh)return;const c=colliderFromObject(THREE,object,{id:'home:shell:'+shellColliders.length,type:'home-shell'});if(c&&c.maxY>.045)shellColliders.push(c);});
   function itemMaterial(color,extra={}){const m=new THREE.MeshStandardMaterial({color,roughness:.82,...extra});itemMaterials.add(m);return m;}
   function buildItem(item){
     const g=new THREE.Group();g.position.set(item.x,0,item.z);g.rotation.y=item.rotation;g.userData.itemId=item.id;furnishings.add(g);
@@ -123,15 +139,18 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
     }else if(item.type==='cabinet'){
       box(g,0,.52,0,1.6,.92,.55,c,.045);for(const x of [-.38,.38]){box(g,x,.52,.29,.73,.8,.035,c);box(g,x+.24,.62,.32,.025,.18,.035,metal);}for(const x of [-.65,.65])for(const z of [-.18,.18])leg(x,z,.1);cyl(g,-.4,1.06,0,.12,.12,ivory);sphere(g,-.4,1.22,0,.15,.19,.14,itemMaterial('#698565'));
     }
+    return g;
   }
-  function makeAction(item,action,title){const t=TYPES[item.type],d=t.d/2+.65;interactables.push({id:'home-'+item.id,kind:'action',action,title,subtitle:TYPES[item.type].name,position:new THREE.Vector3(item.x+Math.sin(item.rotation)*d,0,item.z+Math.cos(item.rotation)*d),radius:2.3});}
+  function makeAction(item,action,title){const t=TYPES[item.type],d=t.d/2+.65,source=sourceForItem(item);interactables.push({id:'home-'+item.id,kind:'action',action,title,subtitle:TYPES[item.type].name,position:new THREE.Vector3(item.x+Math.sin(item.rotation)*d,0,item.z+Math.cos(item.rotation)*d),radius:2.3,soundKind:source.kind,soundPosition:new THREE.Vector3(source.x,source.y,source.z)});}
   function rebuild(){
-    furnishings.clear();for(const material of itemMaterials)material.dispose();itemMaterials.clear();floorMat.color.set(layout.floor);wallMat.color.set(layout.wall);colliders.splice(0,colliders.length,...FIXED.map(x=>({...x})));
-    interactables.splice(0,interactables.length,{id:'exit',kind:'exit',title:'街へ出る',subtitle:'玄関を開ける',position:new THREE.Vector3(0,0,8),radius:2.1},{id:'home-craft',kind:'action',action:'craft',title:'自分の部屋をクラフト',subtitle:'家具・壁・床を自由に整える',position:new THREE.Vector3(2.8,0,7),radius:2.5},{id:'home-kitchen',kind:'action',action:'cook',title:'料理をする',subtitle:'固定キッチンで食材を調理',position:new THREE.Vector3(-4.4,0,-5.7),radius:2.4});
-    for(const item of layout.items){buildItem(item);if(item.type!=='rug')colliders.push({...footprint(item),itemId:item.id});
+    audioSources.splice(0,audioSources.length,...fixedAudio.map(source=>({...source})),...layout.items.map(sourceForItem));
+    furnishings.clear();for(const material of itemMaterials)material.dispose();itemMaterials.clear();floorMat.color.set(layout.floor);wallMat.color.set(layout.wall);colliders.splice(0,colliders.length,...shellColliders);
+    interactables.splice(0,interactables.length,{id:'exit',kind:'exit',title:'街へ出る',subtitle:'玄関を開ける',position:new THREE.Vector3(0,0,8),radius:2.1,soundKind:'door',soundPosition:new THREE.Vector3(0,1.4,8.58)},{id:'home-craft',kind:'action',action:'craft',title:'自分の部屋をクラフト',subtitle:'家具・壁・床を自由に整える',position:new THREE.Vector3(2.8,0,7),radius:2.5,soundKind:'table',soundPosition:new THREE.Vector3(2.8,.9,7.95)},{id:'home-kitchen',kind:'action',action:'cook',title:'料理をする',subtitle:'固定キッチンで食材を調理',position:new THREE.Vector3(-4.4,0,-5.7),radius:2.4,soundKind:'stove',soundPosition:new THREE.Vector3(-6.3,1.1,-6.6)});
+    for(const item of layout.items){const object=buildItem(item);if(item.type!=='rug'){const c=colliderFromObject(THREE,object,{id:'home:item:'+item.id,type:item.type,itemId:item.id});if(c)colliders.push(c);}
       if(item.type==='bed')makeAction(item,'sleep','ベッドで休む');else if(['sofa','chair','desk'].includes(item.type))makeAction(item,'relax','自分の家具でくつろぐ');
       else if(item.type==='plant')makeAction(item,'home:water:'+item.id,'植物に水をあげる');else if(item.type==='lamp')makeAction(item,'home:lamp:'+item.id,care.lamps[item.id]===false?'ライトをつける':'ライトを消す');else if(item.type==='cabinet')makeAction(item,'home:clean','部屋を片づける');
     }
+    collisionIndex.replaceStatic(colliders);
   }
   function localEnvelope(){try{return JSON.parse(localStorage.getItem(getKey())||'null');}catch{return null;}}
   function saveLocal(){try{localStorage.setItem(getKey(),JSON.stringify({layout,updatedAt:Date.now(),dirty,care}));return true;}catch{status='端末の保存容量が足りません。変更はこの画面を開いている間だけ保持されます。';statusError=true;return false;}}
@@ -169,7 +188,7 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
     }catch(e){status='端末には保存済みです。オンライン保存未完了：'+(e.name==='AbortError'?'応答が時間切れになりました。':e.message);statusError=true;return {ok:false,local:true};}
     finally{saving=null;updateStatus();if(!disposed&&savedScope===scope&&revision!==savedRevision)saveTimer=setTimeout(()=>void flushSave(),1000);}})();return saving;
   }
-  function changed(){revision++;dirty=true;care.cleanliness=Math.max(35,care.cleanliness-1);saveLocal();rebuild();clearTimeout(saveTimer);saveTimer=setTimeout(()=>void flushSave(),1000);renderEditor();}
+  function changed(item,action='move'){revision++;dirty=true;care.cleanliness=Math.max(35,care.cleanliness-1);saveLocal();rebuild();clearTimeout(saveTimer);saveTimer=setTimeout(()=>void flushSave(),1000);renderEditor();emitSound(item,action);}
   function ensureStyle(){if(document.querySelector('link[data-machi-housing]'))return;const link=document.createElement('link');link.rel='stylesheet';link.href=new URL('./housing.css',import.meta.url).href;link.dataset.machiHousing='';document.head.append(link);}
   function renderEditor(){
     if(!editor?.isConnected)return;const item=layout.items.find(x=>x.id===selectedId);if(!item)selectedId=null;
@@ -188,29 +207,29 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
     ctx.beginPath();ctx.fillStyle='#1f7155';ctx.arc(cx,cz+7*s,5,0,Math.PI*2);ctx.fill();
   }
   function canvasPoint(event){const rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,z=(event.clientY-rect.top)*canvas.height/rect.height,s=Math.min((canvas.width-38)/15,(canvas.height-48)/17);return {x:snap((x-canvas.width/2)/s),z:snap((z-canvas.height/2)/s)};}
-  function chooseColor(color){const item=layout.items.find(i=>i.id===selectedId);if(item){item.color=color;changed();}else{pendingColor=color;const input=editor?.querySelector('[data-h-color]');if(input)input.value=color;}}
+  function chooseColor(color){const item=layout.items.find(i=>i.id===selectedId);if(item){item.color=color;changed(item,'paint');}else{pendingColor=color;const input=editor?.querySelector('[data-h-color]');if(input)input.value=color;}}
   function bindEditor(){
     canvas.addEventListener('pointerdown',event=>{event.preventDefault();const p=canvasPoint(event);
-      if(mode==='add'){const item={id:uniqueId(),type:pendingType,...p,rotation:pendingRotation,color:pendingColor||TYPES[pendingType].color};const error=layout.items.length>=80?'家具は80個までです。':placementError(item,layout.items);if(error){toast(error);return;}layout.items.push(item);selectedId=item.id;mode='select';changed();return;}
+      if(mode==='add'){const item={id:uniqueId(),type:pendingType,...p,rotation:pendingRotation,color:pendingColor||TYPES[pendingType].color};const error=layout.items.length>=80?'家具は80個までです。':placementError(item,layout.items);if(error){toast(error);return;}layout.items.push(item);selectedId=item.id;mode='select';changed(item,'place');return;}
       const hit=[...layout.items].reverse().filter(i=>i.type!=='rug').find(i=>{const b=footprint(i);return p.x>=b.minX&&p.x<=b.maxX&&p.z>=b.minZ&&p.z<=b.maxZ;})||[...layout.items].reverse().find(i=>{const b=footprint(i);return p.x>=b.minX&&p.x<=b.maxX&&p.z>=b.minZ&&p.z<=b.maxZ;});
       if(hit){selectedId=hit.id;renderEditor();return;}
-      const item=layout.items.find(i=>i.id===selectedId);if(item){const candidate={...item,...p},error=placementError(candidate,layout.items);if(error){toast(error);return;}Object.assign(item,p);changed();}
+      const item=layout.items.find(i=>i.id===selectedId);if(item){const candidate={...item,...p},error=placementError(candidate,layout.items);if(error){toast(error);return;}Object.assign(item,p);changed(item,'move');}
     });
     editor.querySelector('[data-h-select]').onchange=e=>{selectedId=e.target.value||null;mode='select';renderEditor();};
     for(const b of editor.querySelectorAll('[data-h-type]'))b.onclick=()=>{pendingType=b.dataset.hType;pendingColor=null;selectedId=null;pendingRotation=0;mode='add';renderEditor();};
     for(const b of editor.querySelectorAll('[data-h-swatch]'))b.onclick=()=>chooseColor(b.dataset.hSwatch);
     editor.querySelector('[data-h-color]').onchange=e=>chooseColor(e.target.value);
-    for(const key of ['floor','wall'])editor.querySelector(`[data-h-${key}]`).onchange=e=>{layout[key]=e.target.value;changed();};
+    for(const key of ['floor','wall'])editor.querySelector(`[data-h-${key}]`).onchange=e=>{layout[key]=e.target.value;changed({type:key,x:0,z:0},'paint');};
     for(const b of editor.querySelectorAll('[data-h-action]'))b.onclick=async()=>{
       const action=b.dataset.hAction,item=layout.items.find(i=>i.id===selectedId);
       if(action==='select'){mode='select';renderEditor();}
-      else if(action==='rotate'){if(item){const candidate={...item,rotation:quarter(item.rotation+Math.PI/2)},error=placementError(candidate,layout.items);if(error)toast(error);else{item.rotation=candidate.rotation;changed();}}else{pendingRotation=quarter(pendingRotation+Math.PI/2);toast('追加する家具を90°回しました。');}}
-      else if(action==='delete'&&item){layout.items=layout.items.filter(i=>i.id!==item.id);selectedId=null;changed();toast('家具を部屋から取り除きました。');}
+      else if(action==='rotate'){if(item){const candidate={...item,rotation:quarter(item.rotation+Math.PI/2)},error=placementError(candidate,layout.items);if(error)toast(error);else{item.rotation=candidate.rotation;changed(item,'move');}}else{pendingRotation=quarter(pendingRotation+Math.PI/2);toast('追加する家具を90°回しました。');}}
+      else if(action==='delete'&&item){layout.items=layout.items.filter(i=>i.id!==item.id);selectedId=null;changed(item,'remove');toast('家具を部屋から取り除きました。');}
       else if(action==='duplicate'&&item){const result=addFurniture(item.type,{color:item.color});toast(result.message);}
       else if(action==='save')await flushSave();else if(action==='sync'){b.disabled=true;await sync();}
       else if(action==='clean'){handleAction('home:clean');renderEditor();}
       else if(action==='clear'||action==='cancel-clear'){confirmClear=action==='clear';renderEditor();}
-      else if(action==='confirm-clear'){layout.items=[];selectedId=null;confirmClear=false;changed();toast('家具をすべて片づけました。');}
+      else if(action==='confirm-clear'){layout.items=[];selectedId=null;confirmClear=false;changed(null,'clean');toast('家具をすべて片づけました。');}
       else if(action==='defaults'){let added=0;for(const item of defaultLayout().items){if(layout.items.length>=80)break;if(!layout.items.some(i=>i.id===item.id)&&!placementError(item,layout.items)){layout.items.push(item);added++;}}if(added)changed();toast(added?`${added}個の初期家具を追加しました。`:'空き場所に追加できる初期家具はありません。');}
     };
   }
@@ -221,15 +240,15 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
     const item={id:typeof id==='string'&&id.length>0&&id.length<=60?id:uniqueId(),type,x:0,z:0,rotation:0,color:hex(color)?color:TYPES[type].color};
     if(layout.items.some(i=>i.id===item.id))return {ok:false,message:'この家具はすでに部屋にあります。'};
     const places=[];for(let z=-7.5;z<=7.5;z+=.5)for(let x=-6.5;x<=6.5;x+=.5)places.push({x,z});places.sort((a,b)=>Math.hypot(a.x,a.z)-Math.hypot(b.x,b.z));
-    for(const place of places){Object.assign(item,place);if(!placementError(item,layout.items)){layout.items.push(item);selectedId=item.id;mode='select';changed();return {ok:true,id:item.id,message:`${TYPES[type].name}を自分の部屋に置きました。`};}}
+    for(const place of places){Object.assign(item,place);if(!placementError(item,layout.items)){layout.items.push(item);selectedId=item.id;mode='select';changed(item,'place');return {ok:true,id:item.id,message:`${TYPES[type].name}を自分の部屋に置きました。`};}}
     return {ok:false,message:'この家具を置ける空き場所がありません。部屋を整理してください。'};
   }
   function handleAction(action){
-    if(action==='home:clean'){care.cleanliness=100;saveLocal();updateStatus();toast('床や家具を整えて、気持ちのよい部屋になりました。');return true;}
-    if(typeof action==='string'&&action.startsWith('home:water:')){const id=action.slice(11);if(!layout.items.some(i=>i.id===id&&i.type==='plant'))return false;care.water[id]=Date.now();saveLocal();rebuild();toast('植物に水をあげました。葉がいきいきしています。');return true;}
-    if(typeof action==='string'&&action.startsWith('home:lamp:')){const id=action.slice(10);if(!layout.items.some(i=>i.id===id&&i.type==='lamp'))return false;care.lamps[id]=care.lamps[id]===false;saveLocal();rebuild();toast(care.lamps[id]?'ライトをつけました。':'ライトを消しました。');return true;}return false;
+    if(action==='home:clean'){care.cleanliness=100;saveLocal();updateStatus();emitSound(null,'clean');toast('床や家具を整えて、気持ちのよい部屋になりました。');return true;}
+    if(typeof action==='string'&&action.startsWith('home:water:')){const id=action.slice(11),item=layout.items.find(i=>i.id===id&&i.type==='plant');if(!item)return false;care.water[id]=Date.now();saveLocal();rebuild();emitSound(item,'water');toast('植物に水をあげました。葉がいきいきしています。');return true;}
+    if(typeof action==='string'&&action.startsWith('home:lamp:')){const id=action.slice(10),item=layout.items.find(i=>i.id===id&&i.type==='lamp');if(!item)return false;care.lamps[id]=care.lamps[id]===false;saveLocal();rebuild();emitSound(item,'switch');toast(care.lamps[id]?'ライトをつけました。':'ライトを消しました。');return true;}return false;
   }
-  function dispose(){if(disposed)return;saveLocal();disposed=true;clearTimeout(saveTimer);group.removeFromParent();group.clear();for(const g of geometryCache.values())g.dispose();for(const m of [...baseMaterials,...itemMaterials])m.dispose();editor=null;}
+  function dispose(){if(disposed)return;saveLocal();disposed=true;audioSources.length=0;collisionIndex.dispose();clearTimeout(saveTimer);group.removeFromParent();group.clear();for(const g of geometryCache.values())g.dispose();for(const m of [...baseMaterials,...itemMaterials])m.dispose();editor=null;}
   rebuild();await sync();
   function sampleGround(x,z,{minHeight=-Infinity,maxHeight=Infinity}={}){
     if(x<bounds.minX||x>bounds.maxX||z<bounds.minZ||z>bounds.maxZ)return null;
@@ -238,6 +257,6 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
       if(Math.abs(dx*c-dz*n)<=1.6&&Math.abs(dx*n+dz*c)<=1.15&&.0315<=maxHeight){height=.0315;kind='rug';id=item.id;}}
     return height>=minHeight&&height<=maxHeight?{height,normal:{x:0,y:1,z:0},kind,id}:null;
   }
-  return {group,colliders,interactables,spawn,bounds,sampleGround,label:'自分の住まい',openEditor,sync,dispose,addFurniture,handleAction,getLayout:()=>copy(layout),update:()=>{}};
+  return {group,colliders,collisionIndex,interactables,getAudioSources:()=>audioSources,spawn,bounds,sampleGround,label:'自分の住まい',openEditor,sync,dispose,addFurniture,handleAction,getLayout:()=>copy(layout),update:()=>{}};
 }
 function uniqueId(){return 'f-'+(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10));}

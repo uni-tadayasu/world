@@ -59,7 +59,7 @@ function freshState() {
     version:1,name:'あなた',day:1,minutes:560,money:12000,
     hunger:85,energy:90,mood:85,inventory:[],visited:[],goals:[],location:'街',
     position:{x:10,z:33,yaw:0},
-    settings:{sound:false,quality:'auto',sensitivity:1,headBob:true,invertY:false},
+    settings:{sound:true,environmentVolume:.6,quality:'auto',sensitivity:1,headBob:true,invertY:false},
     stats:{steps:0,earned:0,meals:0,shifts:0,cooked:0,rests:0,nights:0,parkRests:0,groceriesBought:0,artVisits:0,conversations:0},
     daily:{workedMinutes:0,talked:[]},journal:[],
   };
@@ -83,7 +83,8 @@ function validateState(input) {
     yaw:finite(input.position.yaw,0,-1e8,1e8),
   };
   if (plainObject(input.settings)) {
-    result.settings.sound = input.settings.sound === true;
+    result.settings.sound = input.settings.sound !== false;
+    result.settings.environmentVolume = finite(input.settings.environmentVolume,.6,0,1);
     result.settings.quality = ['auto','cinematic','ultra','high','medium','low'].includes(input.settings.quality) ? input.settings.quality : 'auto';
     result.settings.sensitivity = finite(input.settings.sensitivity,1,0.25,3);
     result.settings.headBob = input.settings.headBob !== false;

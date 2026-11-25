@@ -1,14 +1,16 @@
 import {createMaterialLibrary} from './materials.js';
 import {createWalkSurfaceIndex} from './walk-surfaces.js';
+import {createObjectCollisionIndex,colliderFromObject} from './object-collisions.js';
 /** Hand-built, human-scale interiors for MACHI LIFE. */
 export function createInterior(THREE, id) {
   const library=createMaterialLibrary(THREE,{quality:'high'});
   const group = new THREE.Group();
   group.name = `interior-${id}`;
-  const colliders = [], interactables = [];
+  const colliders = [], interactables = [], audioSources=[];
+  const sound=(kind,x,y,z,options={})=>{const source={kind,x,y,z,radius:4,ambient:false,...options,id:`interior:${id}:${options.id||kind+'-'+audioSources.length}`};audioSources.push(source);return source;};
   const bounds={minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5};
   const walkSurfaces=createWalkSurfaceIndex({bounds}),sampleGround=walkSurfaces.sampleGround;
-  const labels = {home:'自宅 · ひかりレジデンス',cafe:'こもれび喫茶',market:'ひかりマート',office:'まちワークス',gallery:'ひかりギャラリー',bookstore:'本棚書店'};
+  const labels = {home:'自分の住まい',cafe:'カフェ',market:'マーケット',office:'オフィス',gallery:'ギャラリー',bookstore:'書店'};
   const label = labels[id] || labels.home;
   const matCache = new Map();
   const boxGeo = new THREE.BoxGeometry(1,1,1);
@@ -54,23 +56,27 @@ export function createInterior(THREE, id) {
   }
   function panel(text,sub,x,y,z,w,h,rot=0,bg,fg){const o=textPanel(text,sub,w,h,bg,fg);o.position.set(x,y,z);o.rotation.y=rot;return o;}
   function plant(x,z,scale=1){
+    sound('plant',x,.8*scale,z);
     cyl(x,.23*scale,z,.26*scale,.46*scale,m(0xb58b69,.9),.8);cyl(x,.46*scale,z,.21*scale,.035*scale,m(0x4c3f30));
     cyl(x,.9*scale,z,.03*scale,.9*scale,walnut);
     for(let i=0;i<8;i++){const a=i*2.4;const r=.22+(i%3)*.035;const leaf=sphere(x+Math.cos(a)*r*scale,(.93+i*.075)*scale,z+Math.sin(a)*r*scale,.21*scale,.12*scale,.35*scale,m([0x3f6546,0x54764c,0x667f54][i%3]));leaf.rotation.set(.35*Math.cos(a),a,.4*Math.sin(a));}
   }
   function pendant(x,z,y=3.25){
+    sound('lamp',x,y,z);
     cyl(x,(y+4.5)/2,z,.012,4.5-y,dark);cyl(x,y,z,.42,.28,ivory, .45);cyl(x,y-.145,z,.33,.018,lightMat);
     const l=new THREE.PointLight(0xffe7bd,7,8,2);l.position.set(x,y-.25,z);group.add(l);
   }
-  function wallLight(x,z,rot=0){const o=box(x,2.7,z,.18,.52,.16,brass);o.rotation.y=rot;const g=box(x,2.7,z+.09,.1,.36,.08,lightMat);g.rotation.y=rot;}
-  function table(x,z,w=1.8,d=1.0,y=.76,material=wood){box(x,y,z,w,.095,d,material);for(const dx of [-w/2+.12,w/2-.12])for(const dz of [-d/2+.12,d/2-.12])box(x+dx,y/2,z+dz,.07,y,.07,dark);collider(x,z,w,d);}
+  function wallLight(x,z,rot=0){sound('lamp',x,2.7,z);const o=box(x,2.7,z,.18,.52,.16,brass);o.rotation.y=rot;const g=box(x,2.7,z+.09,.1,.36,.08,lightMat);g.rotation.y=rot;}
+  function table(x,z,w=1.8,d=1.0,y=.76,material=wood){sound('table',x,y,z);box(x,y,z,w,.095,d,material);for(const dx of [-w/2+.12,w/2-.12])for(const dz of [-d/2+.12,d/2-.12])box(x+dx,y/2,z+dz,.07,y,.07,dark);collider(x,z,w,d);}
   function chair(x,z,rot=0,color=0x98734e){
+    sound('chair',x,.55,z);
     const cg=new THREE.Group();const add=(xx,yy,zz,w,h,d,mat)=>{const o=new THREE.Mesh(library.roundedBox(w,h,d,Math.min(.045,Math.min(w,h,d)*.15)),mat);o.position.set(xx,yy,zz);o.castShadow=true;cg.add(o);};
     const seat=m(color,.85);add(0,.47,0,.47,.07,.48,seat);add(0,.77,-.215,.47,.54,.065,seat);for(const xx of [-.18,.18])for(const zz of [-.18,.18])add(xx,.23,zz,.045,.47,.045,dark);cg.position.set(x,0,z);cg.rotation.y=rot;group.add(cg);
   }
   function mug(x,y,z,color=0xe9e3d7){cyl(x,y+.065,z,.075,.13,m(color,.35));cyl(x,y+.132,z,.062,.005,m(0x3b261b));const ring=new THREE.Mesh(new THREE.TorusGeometry(.045,.012,16,48),m(color,.4));ring.position.set(x+.078,y+.07,z);group.add(ring);}
   function book(x,y,z,w=.15,h=.45,color=0x697b73,rot=0){const o=box(x,y+h/2,z,w,h,.29,m(color,.8));o.rotation.y=rot;box(x,y+h*.77,z+.148,w*.72,.012,.006,ivory,false);}
   function shelf(x,z,w=2,h=2.8,d=.55,rot=0,fill='books'){
+    sound(fill==='books'?'bookshelf':'shelf',x,h/2,z);
     const g=new THREE.Group();const old=group.children.length;
     box(x,h/2,z,w,h,d*.12,wood); // solid backing
     for(const dx of [-w/2,w/2])box(x+dx,h/2,z+.2,.065,h,d,wood);
@@ -82,12 +88,15 @@ export function createInterior(THREE, id) {
     const rotatedDepth=Math.abs(Math.sin(rot))*w+Math.abs(Math.cos(rot))*d;
     collider(x,z,rotatedWidth,rotatedDepth);
   }
-  function rug(x,z,w,d,color){const rm=new THREE.MeshStandardMaterial({color:0xffffff,map:texture('rug',color),roughness:1});box(x,.015,z,w,.025,d,rm,false);walkSurfaces.addRect({x,z,width:w,depth:d,height:.0275},{kind:'rug'});}
-  function action(key,title,subtitle,x,z,radius=2.5){interactables.push({id:key,kind:'action',title,subtitle,position:new THREE.Vector3(x,1.2,z),radius,action:key});}
+  function rug(x,z,w,d,color){sound('rug',x,.025,z);const rm=new THREE.MeshStandardMaterial({color:0xffffff,map:texture('rug',color),roughness:1});box(x,.015,z,w,.025,d,rm,false);walkSurfaces.addRect({x,z,width:w,depth:d,height:.0275},{kind:'rug'});}
+  const actionSources={sleep:['bed',4.3,.65,-5.2],cook:['stove',-2.75,1.1,-7.9],relax:['sofa',-4.7,.55,1.4],cafe_menu:['counter',-.8,1.1,-5.5],cafe_work:['coffeemachine',-3.2,1.5,-5.5],shop:['counter',4.3,1.05,5.2],office_work:['desk',4.2,.8,-1.7],admire:['gallery',0,1.85,-2.2],books:['bookshelf',3.7,1,5.7]};
+  function action(key,title,subtitle,x,z,radius=2.5){const [kind,sx,sy,sz]=actionSources[key]||['object',x,1,z];const source=sound(kind,sx,sy,sz,{id:'action-'+key});interactables.push({id:key,kind:'action',title,subtitle,position:new THREE.Vector3(x,1.2,z),radius,action:key,soundKind:kind,soundPosition:new THREE.Vector3(source.x,source.y,source.z)});}
   function art(x,y,z,w,h,seed=0,rot=0){
+    sound('gallery',x,y,z);
     const c=document.createElement('canvas');c.width=512;c.height=Math.round(512*h/w);const ctx=c.getContext('2d');const colors=[['#e2d9bd','#7a9385','#c08265','#273e38'],['#e3e6df','#446d7d','#a1b6b2','#ccaa79'],['#ece2cf','#c6a266','#8a735a','#5e776c']][seed%3];ctx.fillStyle=colors[0];ctx.fillRect(0,0,c.width,c.height);for(let i=0;i<7;i++){ctx.fillStyle=colors[(i+seed)%3+1];ctx.globalAlpha=.55+i*.05;ctx.beginPath();ctx.ellipse(80+(i*137+seed*43)%420,80+(i*91)%Math.max(90,c.height-80),120+(i*19)%100,60+(i*61)%180,(i+seed)*.8,0,Math.PI*2);ctx.fill();}ctx.globalAlpha=1;const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;const frame=box(x,y,z,w+.12,h+.12,.08,wood);frame.rotation.y=rot;const o=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshStandardMaterial({map:t,roughness:.85}));o.position.set(x+Math.sin(rot)*.048,y,z+Math.cos(rot)*.048);o.rotation.y=rot;group.add(o);
   }
   function windowView(x,y,z,w=3.2,h=2.0,rot=Math.PI/2){
+    sound('window',x,y,z);
     const c=document.createElement('canvas');c.width=512;c.height=384;const ctx=c.getContext('2d');const grad=ctx.createLinearGradient(0,0,0,384);grad.addColorStop(0,'#b6d3da');grad.addColorStop(1,'#e8e5d8');ctx.fillStyle=grad;ctx.fillRect(0,0,512,384);for(let i=0;i<12;i++){ctx.fillStyle=['#d6d2c5','#c5cbbe','#c4c9c7'][i%3];let bx=(i*91)%512,by=80+(i*73)%160;ctx.fillRect(bx,by,65,384-by);ctx.fillStyle='#9eaca9';for(let xx=bx+7;xx<bx+58;xx+=16)for(let yy=by+12;yy<380;yy+=28)ctx.fillRect(xx,yy,8,15);}for(let i=0;i<9;i++){ctx.fillStyle=['#779977','#8ca482','#5f8868'][i%3];ctx.beginPath();ctx.arc((i*79)%512,300+(i%2)*30,54,0,Math.PI*2);ctx.fill();}const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;const o=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshStandardMaterial({map:t,emissive:0xaec8ba,emissiveMap:t,emissiveIntensity:.4,roughness:.18}));o.position.set(x,y,z);o.rotation.y=rot;group.add(o);
     const wx=Math.sin(rot),wz=Math.cos(rot);const ex=Math.cos(rot),ez=-Math.sin(rot);
     const frame=(xx,yy,zz,ww,hh,dd)=>{const b=box(xx,yy,zz,ww,hh,dd,m(0xf0eee7));b.rotation.y=rot;};
@@ -106,13 +115,19 @@ export function createInterior(THREE, id) {
   // A visible entrance remains behind the player. Interaction handles going outside.
   box(0,1.4,9.02,2.45,2.8,.12,wood);box(0,1.6,8.945,1.8,1.7,.035,m(0x9db6b3,.2,.12));box(.8,1.18,8.88,.045,.28,.065,brass);
   panel('外へ','STREET',0,2.95,8.83,1.4,.32,Math.PI,'#e8e6df','#33463a');
-  interactables.push({id:'exit',kind:'exit',title:'街へ出る',subtitle:'玄関を開ける',position:new THREE.Vector3(0,1.2,8),radius:2.5});
+  sound('door',0,1.4,9.02,{id:'entrance'});
+  interactables.push({id:'exit',kind:'exit',title:'街へ出る',subtitle:'玄関を開ける',position:new THREE.Vector3(0,1.2,8),radius:2.5,soundKind:'door',soundPosition:new THREE.Vector3(0,1.4,9.02)});
+  // The low room tone comes from a visible ventilation grille.
+  box(0,3.92,-8.82,1.1,.34,.09,ivory);for(let i=0;i<5;i++)box(0,3.8+i*.05,-8.76,.9,.014,.025,dark);
+  sound('vent',0,3.92,-8.76,{id:'vent',radius:17,gain:.11,ambient:true});
+  sound('floor',0,0,0,{id:'floor',radius:12});
   windowView(-7.87,2.2,-3.8,3.8,2.15,Math.PI/2);windowView(-7.87,2.2,3.3,3.8,2.15,Math.PI/2);
   const ambient=new THREE.HemisphereLight(0xfff7e8,0x7a8175,.8);group.add(ambient);
   const fill=new THREE.PointLight(0xfff1da,16,22,2);fill.position.set(0,3.8,0);group.add(fill);
   const sunpatch=new THREE.Mesh(new THREE.PlaneGeometry(4.7,2.5),new THREE.MeshBasicMaterial({color:0xfff0c2,transparent:true,opacity:.1,depthWrite:false}));sunpatch.rotation.x=-Math.PI/2;sunpatch.rotation.z=.3;sunpatch.position.set(-4.6,.025,1.9);group.add(sunpatch);
 
   if(id==='home'){
+    sound('fridge',-6.9,1.1,-5.5,{id:'fridge',radius:8,gain:.16,ambient:true});sound('faucet',-5.25,1.19,-8.2,{id:'faucet'});sound('counter',-4.3,.93,-7.95,{id:'kitchen'});sound('cabinet',.1,.6,1.4,{id:'tv-cabinet'});
     // Bedroom nook with layered linen and a low headboard.
     rug(3.9,-4.1,4.8,6.4,'#d3c8b7');box(4.3,.3,-5.2,2.5,.55,3.6,walnut);box(4.3,.64,-5.2,2.43,.25,3.5,ivory);box(4.3,.82,-4.65,2.48,.18,2.25,m(0x78908a,.95));box(4.3,.94,-6.13,2.0,.22,.65,m(0xf5eee0,.95));box(4.3,.75,-7.05,2.6,1.3,.16,walnut);collider(4.3,-5.2,2.6,3.8);
     box(6.15,.32,-6.25,.7,.65,.65,wood);cyl(6.15,.83,-6.25,.09,.38,brass);cyl(6.15,1.13,-6.25,.24,.32,ivory,.7);
@@ -134,6 +149,7 @@ export function createInterior(THREE, id) {
     action('cook','料理をする','買ってきた食材で食事をつくる',-3.6,-6.25);
     action('relax','ソファでくつろぐ','お気に入りの場所でひと休み',-3.2,2.9);
   } else if(id==='cafe'){
+    sound('counter',3.9,.96,-7.8);sound('coffeemachine',-1.95,1.55,-5.55);sound('counter',-6.8,1,1);
     // Tiled service island and warmly lit timber bar.
     box(-.8,.55,-5.5,9.2,1.1,1.6,m(0x4e6659));box(-.8,1.13,-5.5,9.4,.14,1.82,walnut);collider(-.8,-5.5,9.4,1.8);
     for(let x=-5.2;x<3.6;x+=.18)box(x,.54,-4.68,.055,.95,.035,m(0x6d826c));
@@ -152,6 +168,7 @@ export function createInterior(THREE, id) {
     action('cafe_menu','注文する','香りのよい珈琲と、手づくりの食事',-.7,-3.55,2.6);
     action('cafe_work','カフェで働く','お店を手伝って、収入を得る',3.5,-3.55,2.4);
   } else if(id==='market'){
+    sound('fridge',0,1.25,-8.3,{id:'fridge',radius:13,gain:.2,ambient:true});for(const x of [-4.7,-.3,4.1])sound('shelf',x,1.2,-2);for(const z of [4.5,6])sound('crate',-5.7,.6,z);
     // Three merchandise rows, each with space around both ends.
     for(const x of [-4.7,-.3,4.1]){
       box(x,.13,-2.0,1.3,.26,6.4,m(0xc4c8be));box(x,1.23,-2.0,.09,2.2,6.3,white);collider(x,-2,1.4,6.4);
@@ -173,7 +190,7 @@ export function createInterior(THREE, id) {
     box(2.85,1.16,5.2,.9,.12,.6,m(0xceb47f));box(2.85,1.3,5.2,.5,.22,.35,m(0x938363));
     // Fruit crates at the front window.
     for(let j=0;j<2;j++){box(-5.7,.35,4.5+j*1.5,2.9,.7,1.2,wood);for(let a=0;a<6;a++)for(let b=0;b<2;b++)sphere(-6.8+a*.42,.8,4.22+j*1.5+b*.42,.18,.17,.18,m(j===0?0xb84d36:0xd4b255,.4));collider(-5.7,4.5+j*1.5,2.9,1.2);}
-    panel('毎日の、おいしいを。','ひかりマート',0,3.5,-8.83,7.8,.7,0,'#54705b','#fff8e8');
+    panel('毎日の、おいしいを。','マーケット',0,3.5,-8.83,7.8,.7,0,'#54705b','#fff8e8');
     for(const [x,t] of [[-4.7,'食材'],[-.3,'日用品'],[4.1,'飲みもの']])panel(t,'DAILY MARKET',x,2.7,.9,1.3,.45);
     for(const x of [-3.5,3.5]){box(x,4.35,-1,.25,.08,12,lightMat,false);}
     action('shop','買い物をする','食材や軽食、飲み物をレジで購入する',3.6,6.6,2.7);
@@ -205,9 +222,11 @@ export function createInterior(THREE, id) {
     // Benches leave the view to the exhibition open.
     for(const x of [-3.4,3.4]){box(x,.48,3.0,2.8,.12,.7,wood);for(const dx of [-1.05,1.05])box(x+dx,.23,3.0,.18,.46,.6,m(0x899187));collider(x,3.0,2.8,.75);}
     box(5.7,.6,7.2,2.4,1.2,1.15,ivory);box(5.7,1.23,7.2,2.5,.07,1.25,wood);collider(5.7,7.2,2.5,1.25);box(5.6,1.3,7.2,.6,.05,.65,m(0x617768));
-    plant(-6.7,6.8,1.5);panel('ひかりギャラリー','HIKARI GALLERY',-4.5,2.7,8.83,2.8,.85,Math.PI);
+    for(const x of [-3.4,3.4])sound('bench',x,.48,3);sound('counter',5.7,1.23,7.2);
+    plant(-6.7,6.8,1.5);panel('ギャラリー','GALLERY',-4.5,2.7,8.83,2.8,.85,Math.PI);
     action('admire','アートを鑑賞する','少し立ち止まって、感性を休める',0,-4.3,3.0);
   } else {
+    for(const x of [-4.4,1.9])for(const z of [-3,.8])sound('bookshelf',x,1.2,z);sound('sofa',-5.75,.55,5.6);sound('counter',3.7,1.04,5.7);
     // A real bookshop layout with many individually colored spines.
     shelf(-4.7,-8.4,5.3,3.2,.7);shelf(2.5,-8.4,7.3,3.2,.7);
     shelf(7.35,-3.7,5.7,2.95,.65,-Math.PI/2);shelf(7.35,3.5,4.9,2.95,.65,-Math.PI/2);
@@ -226,6 +245,11 @@ export function createInterior(THREE, id) {
   // Furnishing is static. Consolidating repeated pieces preserves the detail
   // while keeping hundreds of products/books inexpensive on mobile GPUs.
   group.updateMatrixWorld(true);
+  // Register solids before visual instancing. Seats, pots, appliances and their
+  // actual height are included; flat floors/rugs stay with sampleGround.
+  colliders.length=0;
+  group.traverse(object=>{if(!object.isMesh)return;const c=colliderFromObject(THREE,object,{id:`interior:${id}:solid:${colliders.length}`,type:'interior-object'});if(c&&c.maxY>.045)colliders.push(c);});
+  const collisionIndex=createObjectCollisionIndex({colliders,cellSize:2.5});
   const batches=new Map();
   group.traverse(o=>{
     if(!o.isMesh || o.material.transparent || (!o.geometry.userData.qualityShape&&![boxGeo,cylGeo,sphereGeo].includes(o.geometry)))return;
@@ -243,6 +267,6 @@ export function createInterior(THREE, id) {
   let disposed=false;const lights=[];group.traverse(o=>{if(o.isPointLight){o.userData.baseIntensity=o.intensity;lights.push(o);}});
   function setQuality(tier){library.setQuality(tier);group.traverse(o=>{if(o.isMesh)library.updateGeometry(o);});const limit=tier==='low'?2:tier==='medium'?4:12;lights.forEach((light,index)=>{light.visible=index<limit;});}
   function update(){}
-  function dispose(){if(disposed)return;disposed=true;walkSurfaces.dispose();const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture)textures.add(value);}});for(const g of geometries)g.dispose();for(const m of materials)m.dispose();for(const t of textures)t.dispose();library.dispose();group.removeFromParent();group.clear();}
-  return {group,colliders,interactables,sampleGround,setQuality,update,dispose,spawn:{x:0,z:7,yaw:0},bounds,label};
+  function dispose(){if(disposed)return;disposed=true;audioSources.length=0;collisionIndex.dispose();walkSurfaces.dispose();const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture&&!library.ownsTexture(value))textures.add(value);}});for(const g of geometries)g.dispose();for(const m of materials)m.dispose();for(const t of textures)t.dispose();library.dispose();group.removeFromParent();group.clear();}
+  return {group,colliders,collisionIndex,interactables,audioSources,getAudioSources:()=>audioSources,sampleGround,setQuality,update,dispose,spawn:{x:0,z:7,yaw:0},bounds,label};
 }

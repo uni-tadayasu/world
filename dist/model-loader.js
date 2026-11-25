@@ -4,6 +4,7 @@ import { createModelMotion } from './model-motion.js';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_TRIANGLES = 2000000;
+const MOTION_MODES = new Set(['auto','original','authored','procedural','approximate']);
 
 /** Load a self-contained binary glTF / VRM into the game's avatar adapter. */
 export async function loadCharacterModel(THREE, fileOrArrayBuffer, { name = 'モデル', motionConfig = {} } = {}) {
@@ -71,7 +72,7 @@ export async function loadCharacterModel(THREE, fileOrArrayBuffer, { name = 'モ
   const facing = new THREE.Group();
   // VRM 0 faces -Z; VRM 1 faces +Z. Generic GLB may override this in the UI.
   const defaultFacing = json.extensions?.VRM && !json.extensions?.VRMC_vrm ? 0 : 180;
-  const config = { mode: ['auto','procedural','authored'].includes(motionConfig.mode) ? motionConfig.mode : 'auto', facing: Number.isFinite(motionConfig.facing) ? ((motionConfig.facing%360)+360)%360 : defaultFacing };
+  const config = { mode: MOTION_MODES.has(motionConfig?.mode) ? motionConfig.mode : 'auto', facing: Number.isFinite(motionConfig?.facing) ? ((motionConfig.facing%360)+360)%360 : defaultFacing };
   facing.rotation.y = config.facing * Math.PI / 180;
   const normalizer = new THREE.Group();
   normalizer.scale.setScalar(scale);
@@ -84,44 +85,60 @@ export async function loadCharacterModel(THREE, fileOrArrayBuffer, { name = 'モ
   if (json.extensions?.VRM || json.extensions?.VRMC_vrm) limitations.push('VRMの揺れ物・表情プリセット・専用シェーダーは簡易表示です。');
   const clips = gltf.animations || [];
   const clipNames = clips.map((clip,index) => clip.name || `アニメーション ${index+1}`);
-  let rig = identifyHumanoid(THREE, source, gltf, json, facing), autoRigged = false;
-  function ensureRig(force=false) {
-    if (rig.rigged) return true;
-    const generated = buildAutomaticHumanoid(THREE, source, facing, {force});
-    if (!generated) return false;
-    rig = generated; autoRigged = true;
-    limitations.push('骨格のないモデルに簡易骨格とスキンウェイトを生成しました。人型の立ち姿向けです。衣装・髪・特殊な体形では変形が不自然になる場合があります。');
-    return true;
+  const originalRig=identifyHumanoid(THREE,source,gltf,json,facing);
+  let rig=originalRig,generatedRig=null,disposed=false;
+  function enableApproximation() {
+    if(generatedRig||rig.rigged)return;
+    // Never replace authored skin weights. A standing, unskinned model can be
+    // tried explicitly; both its meshes and the generated result remain reversible.
+    generatedRig=buildAutomaticHumanoid(THREE,source,facing);
+    if(generatedRig)rig=generatedRig;
   }
-  if (!rig.rigged) ensureRig(config.mode === 'procedural');
-  if (rig.inferred) limitations.push('名称のない関節を位置と階層から推定しています。関節の位置が異なるモデルでは調整が必要です。');
-  if (!rig.rigged && !clips.length) limitations.push('人型の骨格を判別できません。「骨格モーション」で簡易骨格の生成を試せます。四足動物・乗り物などの任意形状は専用の骨格またはアニメーションが必要です。');
-  let disposed = false;
-  const createMotion = () => createModelMotion(THREE, {source,group,facing,bones:rig.bones,clips,rigged:rig.rigged,frontSign:-1,mode:config.mode});
-  let motion = createMotion();
-  const motionSummary = () => config.mode==='authored' && clips.length ? '付属アニメーションを優先して再生' : autoRigged ? '自動生成した簡易骨格で待機・歩行・走行・ジャンプ' : rig.rigged
-    ? clips.length && config.mode !== 'procedural' ? '付属モーション＋不足する動作を骨格で補完' : '骨格から待機・歩行・走行・ジャンプを生成'
-    : clips.length ? '付属アニメーションを再生' : '人型を判別できません。骨格モーションを試すか、骨格付きモデルを読み込んでください';
-  function update(dt,context={}) { if (!disposed) motion.update(dt,context); }
+  if(config.mode==='approximate')enableApproximation();
+  const createMotion=()=>createModelMotion(THREE,{source,group,facing,bones:rig.bones,clips,rigged:rig.rigged,frontSign:-1,mode:config.mode});
+  let motion=createMotion();
+  function motionSummary() {
+    if(config.mode==='original')return '元の形状と姿勢を保持（動作補正なし）';
+    if(generatedRig)return '明示的に生成した簡易骨格（試験的・元の形に戻せます）';
+    if(config.mode==='authored')return clips.length?'付属アニメーションだけを再生':'付属アニメーションがないため、元の形状を保持';
+    if(config.mode==='procedural'&&!rig.rigged)return '安全に確認できる人型骨格がないため、元の形状を保持';
+    if(config.mode==='approximate'&&!rig.rigged)return '簡易補完に適合する立ち姿ではないため、元の形状を保持';
+    if(rig.rigged)return clips.length&&config.mode==='auto'?'付属モーションを優先し、確認済みの骨格で不足を補完':'原形を保ち、移動時に既存の人型骨格で動作';
+    return clips.length?'元の骨格を保持して付属アニメーションを再生':'元の形状を保持して移動（付属アニメーションなし）';
+  }
+  function modelLimitations() {
+    const messages=[...limitations];
+    if(generatedRig)messages.push('簡易人型補完は試験的な変形です。衣服・髪・特殊な体形で崩れた場合は「元の形に戻す」を選んでください。元の頂点・材質は保持しています。');
+    else if(!originalRig.rigged&&originalRig.hasSkin)messages.push(originalRig.reason);
+    else if(!originalRig.rigged&&!clips.length)messages.push('骨格のないモデルには、自動で人型の変形を加えません。必要な場合だけ「簡易人型補完」を試せます。');
+    return messages;
+  }
+  function update(dt,context={}) {if(!disposed)motion.update(dt,context);}
   function setMotionConfig(next={}) {
     if(disposed)return {...config};
-    if(['auto','procedural','authored'].includes(next.mode)) {
-      if(next.mode==='procedural' && !rig.rigged) {
-        motion.dispose();ensureRig(true);motion=createMotion();
-      }
-      config.mode=next.mode;motion.setMode(config.mode);
+    if(MOTION_MODES.has(next.mode)&&next.mode!==config.mode) {
+      motion.dispose();
+      if(generatedRig&&next.mode!=='approximate') {generatedRig.restore();generatedRig=null;rig=originalRig;}
+      config.mode=next.mode;
+      if(config.mode==='approximate')enableApproximation();
+      motion=createMotion();
     }
-    if(Number.isFinite(next.facing)) { config.facing=((next.facing%360)+360)%360;facing.rotation.y=config.facing*Math.PI/180; }
+    if(Number.isFinite(next.facing)) {config.facing=((next.facing%360)+360)%360;facing.rotation.y=config.facing*Math.PI/180;}
     update(0,{});return {...config};
   }
   function dispose() {
     if(disposed)return;disposed=true;motion.dispose();
-    // Includes an automatically generated skeleton outside the original scene.
+    // Restore first so every original geometry is disposed once, including those
+    // temporarily detached while an experimental rig was being previewed.
+    generatedRig?.restore();generatedRig=null;
     disposeObject(facing);group.removeFromParent();group.clear();
   }
-  return {group,update,dispose,triangles,animations:clipNames,method:'glb',limitations,setMotionConfig,
+  return {group,update,dispose,triangles,animations:clipNames,method:'glb',setMotionConfig,
     getMotionConfig:()=>({...config}),getMotionStatus:()=>motion.getStatus(),
-    get rigged(){return rig.rigged;},get autoRigged(){return autoRigged;},get motionMode(){return config.mode;},get motionSummary(){return motionSummary();}};
+    get rigged(){return rig.rigged;},get autoRigged(){return Boolean(generatedRig);},get motionMode(){return config.mode;},
+    get motionSummary(){return motionSummary();},get limitations(){return modelLimitations();},
+    get motionCapabilities(){return {knownRig:originalRig.rigged,confidence:originalRig.confidence,canApproximate:!originalRig.hasSkin,hasAnimations:clips.length>0,reason:originalRig.reason};}};
+
 }
 
 function inspectBinaryGltf(buffer) {

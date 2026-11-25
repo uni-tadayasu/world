@@ -18,10 +18,11 @@ async function scenario(name,fn){storage.clear();await fn();passed++;console.log
 try{
   await scenario('map request starts before elevation; exact radius and source survive cache',async()=>{
     const calls=[];let releaseTerrain;
+    storage.set('machi-realworld-osm-v1',JSON.stringify([{key:'35.68120,139.76710,150',savedAt:Date.now(),data,provider:'old-map-without-street-lamps'}]));
     fetch=async(url,init)=>{calls.push({url,init});return json(200,data,{'X-World-Provider':'dresel-asia'});};
     const terrainPromise=new Promise(resolve=>releaseTerrain=resolve);
     const pending=build({...options,terrainPromise});assert.equal(calls.length,1,'map must start while terrain is pending');
-    const parsed=new URL(calls[0].url);assert.equal(parsed.origin,native);assert.equal(parsed.pathname,'/api/world');assert.equal(parsed.searchParams.get('radius'),'150');assert.equal(calls[0].init.credentials,'omit');
+    const parsed=new URL(calls[0].url);assert.equal(parsed.origin,native);assert.equal(parsed.pathname,'/api/world');assert.equal(parsed.searchParams.get('radius'),'150');assert.equal(parsed.searchParams.get('v'),'2','old HTTP map cache is bypassed');assert.equal(calls[0].init.credentials,'omit');
     releaseTerrain({heightAt:()=>0,sourceInfo:{provider:'fixture'}});const world=await pending;
     assert.equal(world.radius,150);assert.equal(world.sourceInfo.provider,'dresel-asia');assert.equal(world.sourceInfo.transport,'proxy');assert.equal(world.sourceInfo.terrain,'elevation');assert.equal(world.real,true);
     assert.equal(world.sourceInfo.traffic.mode,'simulation');assert.equal(world.sourceInfo.traffic.observed,false);
@@ -31,7 +32,7 @@ try{
   await scenario('503 proxy response or network error uses one direct transport fallback',async()=>{
     for(const mode of ['503','network']){
       storage.clear();const calls=[];fetch=async(url,init)=>{calls.push({url,init});if(calls.length===1){if(mode==='network')throw new TypeError('offline');return json(503,{error:'temporary'});}return json();};
-      const world=await build(options);assert.equal(calls.length,2);assert.equal(calls[1].url,direct);assert.equal(calls[1].init.method,'POST');assert.equal(world.sourceInfo.transport,'direct');assert.equal(world.sourceInfo.provider,'private.coffee');
+      const world=await build(options);assert.equal(calls.length,2);assert.equal(calls[1].url,direct);assert.equal(calls[1].init.method,'POST');assert.ok(new URLSearchParams(calls[1].init.body).get('data').includes('["highway"="street_lamp"]'));assert.equal(world.sourceInfo.transport,'direct');assert.equal(world.sourceInfo.provider,'private.coffee');
     }
   });
 

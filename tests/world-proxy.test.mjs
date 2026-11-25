@@ -20,6 +20,7 @@ try{
     assert(calls[0].options.headers['User-Agent'].includes('MACHI-LIFE/'));
     const query=calls[0].options.body.get('data');assert(query.includes('(around:275,35.681200,139.767100)'));assert(query.includes('[timeout:17]'));assert(query.includes('out geom'));
     assert(worldQuery(35,139,150).includes('(around:150,35.000000,139.000000)'));
+    assert(worldQuery(35,139,150).includes('["highway"="street_lamp"]'));
     const hit=await handleWorld(request(undefined,{headers:{Origin:'https://uni-tadayasu.github.io'}}));
     assert.equal(hit.headers.get('X-World-Cache'),'hit');assert.equal(hit.headers.get('Access-Control-Allow-Origin'),'https://uni-tadayasu.github.io');assert.equal(calls.length,1);
     const head=await handleWorld(request(undefined,{method:'HEAD'}));assert.equal(await head.text(),'');assert.equal(calls.length,1);

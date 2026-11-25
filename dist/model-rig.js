@@ -1,85 +1,83 @@
-// Humanoid discovery and a bounded, local fallback for unskinned upright models.
-// Spatial skinning is approximate; authored weights remain untouched.
+// Preserve authored skins. Only a verified, upright humanoid may receive generated
+// joint motion; spatial guesses never select a skeleton in the default path.
 export function identifyHumanoid(THREE, source, gltf, json, frame) {
-  const bones = {}, byIndex = new Map(), candidates = [];
-  source.traverse(object => {
-    const index = gltf.parser?.associations?.get(object)?.nodes;
-    if (Number.isInteger(index)) byIndex.set(index, object);
-    if (object.isBone) candidates.push(object);
+  const bones={},byIndex=new Map(),skinnedMeshes=[],weightedBones=new Set();
+  source.traverse(object=>{
+    const index=gltf.parser?.associations?.get(object)?.nodes;
+    if(Number.isInteger(index))byIndex.set(index,object);
+    if(object.isSkinnedMesh&&object.skeleton)skinnedMeshes.push(object);
   });
-  for (const item of json.extensions?.VRM?.humanoid?.humanBones || []) {
-    if (byIndex.has(item.node)) bones[item.bone] = byIndex.get(item.node);
-  }
-  for (const [key, item] of Object.entries(json.extensions?.VRMC_vrm?.humanoid?.humanBones || {})) {
-    if (byIndex.has(item.node)) bones[key] = byIndex.get(item.node);
-  }
-  source.traverse(object => {
-    const key = humanoidKey(object.userData?.name || object.name || '');
-    if (key && !bones[key] && affectsMesh(object)) bones[key] = object;
-  });
-  let inferred = false;
-  // Some exporters replace joint names with numbers. Use anatomy only when the
-  // model contains enough joints, and require two distinct downward leg chains.
-  if (['leftUpperLeg','rightUpperLeg','leftLowerLeg','rightLowerLeg'].some(key=>!bones[key]) && candidates.length >= 10) {
-    frame.updateWorldMatrix(true, true);
-    const inverse = frame.matrixWorld.clone().invert();
-    const points = new Map(candidates.map(b => [b, b.getWorldPosition(new THREE.Vector3()).applyMatrix4(inverse)]));
-    const used = new Set(Object.values(bones));
-    const nearest = (x, y, z, predicate = () => true) => {
-      let best = null, score = Infinity;
-      for (const bone of candidates) {
-        if (used.has(bone) || !predicate(bone)) continue;
-        const p = points.get(bone), d = (p.x-x)**2 + (p.y-y)**2 + (p.z-z)**2;
-        if (d < score) { best = bone; score = d; }
-      }
-      return score < .26**2 ? best : null;
-    };
-    const hips = bones.hips || nearest(0, .91, 0, b => b.children.length >= 2);
-    if (hips) {
-      const found = {};
-      for (const [side, sign] of [['left', 1], ['right', -1]]) {
-        const upper = bones[side+'UpperLeg'] || nearest(sign*.14, .88, 0, b => isDescendant(b, hips) && points.get(b).x*sign > .025);
-        if (!upper) continue;
-        const lower = bones[side+'LowerLeg'] || nearest(sign*.14, .48, 0, b => isDescendant(b, upper));
-        const foot = bones[side+'Foot'] || (lower && nearest(sign*.14, .10, 0, b => isDescendant(b, lower)));
-        if (lower && foot && upper !== lower && lower !== foot) Object.assign(found, {[side+'UpperLeg']:upper, [side+'LowerLeg']:lower, [side+'Foot']:foot});
-      }
-      if (found.leftFoot && found.rightFoot && found.leftUpperLeg !== found.rightUpperLeg) {
-        Object.assign(bones, {hips}, found); inferred = true;
-        Object.values(bones).forEach(b => used.add(b));
-        for (const [key, x, y] of [['spine',0,1.13],['head',0,1.57],['leftUpperArm',.23,1.4],['rightUpperArm',-.23,1.4]]) {
-          if (!bones[key]) { const bone = nearest(x,y,0); if (bone) { bones[key]=bone; used.add(bone); } }
-        }
+  for(const mesh of skinnedMeshes) {
+    const indices=mesh.geometry.attributes.skinIndex,weights=mesh.geometry.attributes.skinWeight;
+    if(!indices||!weights)continue;
+    for(let i=0;i<weights.count;i++)for(let j=0;j<4;j++) {
+      if(weights.getComponent(i,j)>.00001) {
+        const bone=mesh.skeleton.bones[indices.getComponent(i,j)];if(bone)weightedBones.add(bone);
       }
     }
   }
-  // Complete recognized chains without depending on a particular naming scheme.
-  for (const side of ['left','right']) {
-    for (const [parentKey, childKey] of [['UpperLeg','LowerLeg'],['LowerLeg','Foot'],['Foot','Toes'],['UpperArm','LowerArm'],['LowerArm','Hand']]) {
-      if (!bones[side+childKey] && bones[side+parentKey]) {
-        const children = bones[side+parentKey].children.filter(b => b.isBone && !/twist|roll|ik|end|helper/i.test(b.name));
-        if (children.length === 1) bones[side+childKey] = children[0];
-      }
+  const affectsMesh=object=>{
+    if(weightedBones.has(object))return true;
+    if([...weightedBones].some(b=>isDescendant(b,object)))return true;
+    let visible=object.isMesh;object.traverse(child=>{if(child.isMesh)visible=true;});return visible;
+  };
+  let definition='named';
+  for(const item of json.extensions?.VRM?.humanoid?.humanBones||[])if(byIndex.has(item.node)){bones[item.bone]=byIndex.get(item.node);definition='vrm';}
+  for(const [key,item]of Object.entries(json.extensions?.VRMC_vrm?.humanoid?.humanBones||{}))if(byIndex.has(item.node)){bones[key]=byIndex.get(item.node);definition='vrm';}
+  source.traverse(object=>{
+    const key=humanoidKey(object.userData?.name||object.name||'');
+    if(key&&!bones[key]&&affectsMesh(object))bones[key]=object;
+  });
+  const unavailable=reason=>({bones,rigged:false,inferred:false,confidence:'none',reason,hasSkin:skinnedMeshes.length>0});
+  const required=['hips','leftUpperLeg','rightUpperLeg','leftLowerLeg','rightLowerLeg','leftFoot','rightFoot'];
+  if(required.some(key=>!bones[key]))return unavailable('人型の関節定義を確認できないため、元の骨格と形状を保持します。');
+  if(new Set(required.map(key=>bones[key])).size!==required.length)return unavailable('複数の関節が同じノードを参照しているため、人型補正を停止しています。');
+  for(const side of ['left','right']) {
+    const upper=bones[side+'UpperLeg'],lower=bones[side+'LowerLeg'],foot=bones[side+'Foot'];
+    if(!isDescendant(upper,bones.hips)||!isDescendant(lower,upper)||!isDescendant(foot,lower)||!affectsMesh(upper)||!affectsMesh(lower))return unavailable('脚の親子関係とスキンの対応を確認できないため、人型補正を停止しています。');
+  }
+  // Independently bound clothing/hair/second characters must never be left behind
+  // while only the first matching skeleton is posed.
+  if([...weightedBones].some(b=>b!==bones.hips&&!isDescendant(b,bones.hips)))return unavailable('独立した骨格が含まれるため、付属モーションと元の形状を優先します。');
+  for(const bone of Object.values(bones))for(let node=bone;node&&node!==frame;node=node.parent) {
+    const {x,y,z}=node.scale,largest=Math.max(Math.abs(x),Math.abs(y),Math.abs(z));
+    if(![x,y,z].every(Number.isFinite)||Math.min(x,y,z)<=0||largest-Math.min(x,y,z)>largest*.0001)return unavailable('非一様または反転した縮尺があるため、骨格の自動補正を停止しています。');
+  }
+  for(const mesh of skinnedMeshes)for(const inverse of mesh.skeleton.boneInverses) {
+    if(!inverse.elements.every(Number.isFinite)||inverse.determinant()===0)return unavailable('スキンの結合行列を確認できないため、骨格の自動補正を停止しています。');
+  }
+  frame.updateWorldMatrix(true,true);const inverseFrame=frame.matrixWorld.clone().invert();
+  const point=key=>bones[key].getWorldPosition(new THREE.Vector3()).applyMatrix4(inverseFrame);
+  const hips=point('hips');
+  if(hips.y<.35||hips.y>1.45)return unavailable('立ち姿の関節配置ではないため、元の姿勢を保持します。');
+  for(const side of ['left','right']) {
+    const upper=point(side+'UpperLeg'),lower=point(side+'LowerLeg'),foot=point(side+'Foot');
+    const thigh=upper.clone().sub(lower),shin=lower.clone().sub(foot),a=thigh.length(),b=shin.length();
+    if(a<.08||b<.08||a+b>1.5||a/b<.25||a/b>4||thigh.y/a<.6||shin.y/b<.6||foot.y<-.25||foot.y>.65)return unavailable('座り姿・寝姿などの関節配置は、立ち姿へ強制変換せず保持します。');
+  }
+  if(point('leftUpperLeg').distanceTo(point('rightUpperLeg'))<.04)return unavailable('左右の脚を安全に区別できないため、元の姿勢を保持します。');
+  // Optional arms also need a real chain. Their absence must not lead us to pose
+  // an unrelated accessory, hair joint, or object with a similar name.
+  for(const side of ['left','right']) {
+    const upper=bones[side+'UpperArm'],lower=bones[side+'LowerArm'];
+    if(!upper||!lower||!isDescendant(upper,bones.hips)||!isDescendant(lower,upper)||!affectsMesh(upper)||!affectsMesh(lower)) {
+      delete bones[side+'UpperArm'];delete bones[side+'LowerArm'];delete bones[side+'Hand'];
     }
   }
-  return { bones, inferred, rigged: ['leftUpperLeg','rightUpperLeg','leftLowerLeg','rightLowerLeg'].every(key=>bones[key] && affectsMesh(bones[key])) };
+  return {bones,rigged:true,inferred:false,confidence:definition,reason:'',hasSkin:skinnedMeshes.length>0};
 }
 
-function affectsMesh(object) {
-  if(object.isBone || object.isMesh)return true;
-  let found=false;object.traverse(child=>{if(child.isMesh)found=true;});return found;
-}
-
-function isDescendant(node, parent) {
-  for (let p=node.parent; p; p=p.parent) if (p === parent) return true;
+function isDescendant(node,parent) {
+  for(let p=node?.parent;p;p=p.parent)if(p===parent)return true;
   return false;
 }
 
 export function humanoidKey(raw) {
   let name = raw.normalize('NFKC').toLowerCase().replace(/^.*:/,'')
     .replace(/^(?:mixamorig\d*|j[_ .-]?bip|bip\d*|def|org)[_ .-]*/,'')
+    .replace(/^(?:c|center)[_. -]+/,'')
     .replace(/(?:[_. -]\d+)+$/,'');
-  if (/twist|roll|(?:^|[_. -])(?:ik|mch|ctrl)(?:[_. -]|$)|(?:end|nub)$/.test(name)) return null;
+  if (/twist|roll|捩|補助|(?:^|[_. -])(?:ik|mch|ctrl)(?:[_. -]|$)|(?:end|nub)$/.test(name)) return null;
   const side = /left|左/.test(name) || /(?:^|[_. -])l(?:[_. -]|$)/.test(name) ? 'left'
     : /right|右/.test(name) || /(?:^|[_. -])r(?:[_. -]|$)/.test(name) ? 'right' : null;
   let compact = name.replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]/g,'');
@@ -105,21 +103,22 @@ export function humanoidKey(raw) {
   return null;
 }
 
-/** Generate GPU skin weights in the normalized model frame; preserve UVs/materials. */
+/** Explicit experimental option. Its original meshes remain available for undo. */
 export function buildAutomaticHumanoid(THREE, source, frame, { force=false } = {}) {
   frame.updateWorldMatrix(true, true);
   const inverse = frame.matrixWorld.clone().invert(), point = new THREE.Vector3();
   const meshes = [], samples = [], box = new THREE.Box3();
-  let existingSkin = false;
+  let existingSkin = false,unsupportedMesh=false;
   source.traverse(mesh => {
     if (mesh.isSkinnedMesh) existingSkin = true;
+    if(mesh.isInstancedMesh)unsupportedMesh=true;
     if (!mesh.isMesh || mesh.isSkinnedMesh || mesh.isInstancedMesh || !mesh.geometry?.attributes.position) return;
     meshes.push(mesh);
     const attr = mesh.geometry.attributes.position, matrix = inverse.clone().multiply(mesh.matrixWorld);
     const stride = Math.max(1,Math.floor(attr.count/1200));
     for(let i=0;i<attr.count;i+=stride) { point.fromBufferAttribute(attr,i).applyMatrix4(matrix); samples.push(point.clone()); box.expandByPoint(point); }
   });
-  if (existingSkin || !meshes.length || box.isEmpty()) return null;
+  if (existingSkin || unsupportedMesh || !meshes.length || box.isEmpty()) return null;
   const size = box.getSize(new THREE.Vector3()), h=size.y;
   const bandWidth = (min,max) => {
     const xs=samples.filter(p=>p.y>=box.min.y+h*min && p.y<=box.min.y+h*max).map(p=>p.x).sort((a,b)=>a-b);
@@ -163,7 +162,7 @@ export function buildAutomaticHumanoid(THREE, source, frame, { force=false } = {
   const skeleton=new THREE.Skeleton(list);
   const segmentsData=segments.map(([key,end])=>({key,index:list.indexOf(bones[key]),a:positions[key],b:end?positions[end]:positions[key].clone().add(new THREE.Vector3(0,key==='head'?h*.1:0,key.includes('Toes')?h*.03:0))}));
   const ab=new THREE.Vector3(), ap=new THREE.Vector3(), closest=new THREE.Vector3();
-  const replacedGeometry=new Set();
+  const replacements=[];
   for(const original of meshes) {
     const geometry=original.geometry.clone(), attr=geometry.attributes.position;
     const indices=new Uint16Array(attr.count*4), weights=new Float32Array(attr.count*4);
@@ -199,10 +198,19 @@ export function buildAutomaticHumanoid(THREE, source, frame, { force=false } = {
     parent.remove(original);parent.add(replacement);
     parent.children.splice(parent.children.indexOf(replacement),1);parent.children.splice(index,0,replacement);
     replacement.updateWorldMatrix(true,false); replacement.bind(skeleton,replacement.matrixWorld);
-    replacedGeometry.add(original.geometry);
+    replacements.push({original,replacement,parent,index});
   }
-  // Only dispose old geometries once all replacements have stopped referencing them.
-  const retained=new Set();source.traverse(o=>{if(o.geometry)retained.add(o.geometry);});
-  for(const geometry of replacedGeometry) if(!retained.has(geometry)) geometry.dispose();
-  return {bones,rigRoot,skeleton,rigged:true,inferred:false,autoRigged:true};
+  let restored=false;
+  function restore() {
+    if(restored)return;restored=true;
+    // Reverse order also restores meshes nested inside another replaced mesh.
+    for(const {original,replacement,parent,index}of [...replacements].reverse()) {
+      for(const child of [...replacement.children])original.add(child);
+      parent.remove(replacement);parent.add(original);
+      parent.children.splice(parent.children.indexOf(original),1);parent.children.splice(index,0,original);
+      replacement.geometry.dispose();
+    }
+    rigRoot.removeFromParent();skeleton.dispose();frame.updateMatrixWorld(true);
+  }
+  return {bones,rigRoot,skeleton,rigged:true,inferred:false,confidence:'approximate',autoRigged:true,restore};
 }
