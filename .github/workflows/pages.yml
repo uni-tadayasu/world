@@ -1,0 +1,56 @@
+name: Publish MACHI LIFE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Validate browser JavaScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in dist/*.js; do
+            node --check "$file"
+          done
+          test -s dist/index.html
+          test -s dist/ogp.png
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Prepare static website
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .pages-artifact
+          cp -R dist/. .pages-artifact/
+          rm -rf .pages-artifact/server
+          touch .pages-artifact/.nojekyll
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .pages-artifact
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

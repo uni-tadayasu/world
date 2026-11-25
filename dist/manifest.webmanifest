@@ -1,0 +1,31 @@
+{
+  "id": "./",
+  "name": "まち｜MACHI LIFE",
+  "short_name": "まち",
+  "description": "現在地から街を歩き、自分のキャラクターで暮らす3Dブラウザライフゲーム。",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#183d38",
+  "background_color": "#102f2a",
+  "categories": [
+    "games",
+    "entertainment"
+  ],
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"name":"machi-life","version":"1.0.0","private":true,"type":"module","description":"A walkable real-world city life simulation","dependencies":{"three":"0.170.0"},"scripts":{"dev":"node scripts/dev.mjs","build":"node scripts/build.mjs","check":"node scripts/check.mjs"}}

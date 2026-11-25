@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /world/server/
+
+Sitemap: https://uni-tadayasu.github.io/world/sitemap.xml
