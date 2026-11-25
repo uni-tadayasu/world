@@ -17,35 +17,59 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      build_type: ${{ steps.mode.outputs.build_type }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Validate browser JavaScript
+      - name: Validate browser JavaScript and entry points
         shell: bash
         run: |
           set -euo pipefail
           for file in dist/*.js; do
             node --check "$file"
           done
+          node --check scripts/build.mjs
+          test -s index.html
           test -s dist/index.html
-          test -s dist/ogp.png
+          test -s ogp.png
+      - name: Read existing Pages publishing mode
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pages_build_type="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq '.build_type')"
+          case "$pages_build_type" in
+            legacy|workflow) ;;
+            *) echo "Unsupported or unavailable Pages publishing mode." >&2; exit 1 ;;
+          esac
+          echo "build_type=$pages_build_type" >> "$GITHUB_OUTPUT"
+          if [ "$pages_build_type" = legacy ]; then
+            echo "Validated main/root website. GitHub's branch Pages build owns publication."
+          fi
       - name: Configure Pages
+        if: steps.mode.outputs.build_type == 'workflow'
         uses: actions/configure-pages@v5
       - name: Prepare static website
+        if: steps.mode.outputs.build_type == 'workflow'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .pages-artifact
           cp -R dist/. .pages-artifact/
-          rm -rf .pages-artifact/server
+          rm -rf .pages-artifact/server .pages-artifact/.openai
           touch .pages-artifact/.nojekyll
       - name: Upload Pages artifact
+        if: steps.mode.outputs.build_type == 'workflow'
         uses: actions/upload-pages-artifact@v3
         with:
           path: .pages-artifact
 
   deploy:
     needs: build
+    if: needs.build.outputs.build_type == 'workflow'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

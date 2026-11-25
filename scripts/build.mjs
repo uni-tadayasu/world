@@ -1,9 +1,29 @@
-import {readdir,readFile,mkdir,writeFile} from 'node:fs/promises';
+import {readdir,readFile,mkdir,writeFile,copyFile} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 const root=process.cwd(),dist=path.join(root,'dist');
 const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json','.xml':'application/xml; charset=utf-8','.txt':'text/plain; charset=utf-8','.ico':'image/x-icon'};
 const assets={};
+// Keep the existing GitHub Pages main/root source compatible with the same game.
+// Do not use <base>: navigation and the manifest must stay under /world/.
+async function syncPagesRoot(){
+  const source=await readFile(path.join(dist,'index.html'),'utf8');
+  const rootIndex=source
+    .replace(/((?:src|href)=["'])\.\/([^"']+\.(?:js|css)(?:[?#][^"']*)?)(["'])/g,'$1./dist/$2$3')
+    .replace(/(<script\b[^>]*type=["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi,(_,open,json,close)=>{
+      const map=JSON.parse(json);
+      for(const [name,url] of Object.entries(map.imports||{}))if(typeof url==='string'&&url.startsWith('./'))map.imports[name]='./dist/'+url.slice(2);
+      return open+JSON.stringify(map)+close;
+    })
+    .replace(/href=["']\.\/["']/g,'href="/world/"');
+  await writeFile(path.join(root,'index.html'),rootIndex);
+  const about=(await readFile(path.join(dist,'about.html'),'utf8'))
+    .replace(/href=["']\.\/["']/g,'href="/world/"')
+    .replace(/href=["']\.\/vendor\//g,'href="./dist/vendor/');
+  await writeFile(path.join(root,'about.html'),about);
+  for(const name of ['favicon.svg','favicon-32.png','apple-touch-icon.png','icon-192.png','icon-512.png','ogp.png','social-card.svg','manifest.webmanifest','robots.txt','sitemap.xml'])await copyFile(path.join(dist,name),path.join(root,name));
+}
+await syncPagesRoot();
 async function walk(dir,prefix='') {for(const file of await readdir(dir,{withFileTypes:true})){if(['server','.openai','.DS_Store'].includes(file.name))continue;const rel=prefix+'/'+file.name,full=path.join(dir,file.name);if(file.isDirectory())await walk(full,rel);else{const bytes=await readFile(full);assets[rel]={data:bytes.toString('base64'),type:types[path.extname(file.name)]||'application/octet-stream',etag:'"'+createHash('sha256').update(bytes).digest('hex').slice(0,24)+'"'};}}}
 await walk(dist);
 const social=(await readFile(path.join(root,'worker/social.js'),'utf8')).replace(/^export\s+(?=(?:async\s+)?function|const|class)/gm,'');

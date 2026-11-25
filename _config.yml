@@ -1,0 +1,22 @@
+# Existing GitHub Pages: Deploy from a branch → main / (root).
+# index.html is generated from dist/index.html by scripts/build.mjs.
+title: まち｜MACHI LIFE
+url: https://uni-tadayasu.github.io
+baseurl: /world
+readme_index:
+  enabled: false
+exclude:
+  - README.md
+  - worker
+  - drizzle
+  - scripts
+  - node_modules
+  - package.json
+  - package-lock.json
+  - .openai
+  - .sites-runtime
+  - .github
+  - .gitignore
+  - .pages-artifact
+  - dist/server
+  - dist/.openai

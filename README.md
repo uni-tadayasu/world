@@ -58,7 +58,7 @@ GitHub Pagesにはブラウザ用静的ファイルだけを配信します。�
 
 ## ローカルで実行
 
-静的版はビルド不要です。Three.jsと必要なローダーは`dist/vendor/`に同梱しています。
+`dist/`内の静的版はビルド不要です。Three.jsと必要なローダーは`dist/vendor/`に同梱しています。main/root公開用のルートHTMLとSEOアセットは、変更後に`node scripts/build.mjs`で同期してください。
 
 ```bash
 python3 -m http.server 8000 --directory dist
@@ -99,7 +99,9 @@ for file in dist/*.js; do node --check "$file"; done
 
 ## mainから自動公開
 
-GitHubのPages設定で配信元に「GitHub Actions」を選ぶと、`main`へのpushと手動実行で公開ワークフローが動きます。JavaScriptの構文と基本アセットを確認し、`dist/`を配信します。`dist/server/`は配信用コピーから除外し、Workerのコードは静的配信しません。
+既存の「Deploy from a branch → main / (root)」と「GitHub Actions」の両方に対応しています。`node scripts/build.mjs` は、`dist/`のゲームからルートの`index.html`・`about.html`・SEOアセットを同期します。ルートHTMLはJavaScript・CSSを`dist/`から読み込み、ホームのURLを `/world/` に保ちます。`_config.yml`はREADMEによるトップページ化を防ぎ、Worker・開発スクリプト・依存関係・設定ファイルをJekyll配信から除外します。
+
+main更新のワークフローは、GitHub Pages APIを読み取って現在の`build_type`を確認します。`legacy`（main/root配信）の場合は検証だけで終了し、GitHub標準のブランチ公開に任せます。`workflow`の場合だけ静的アーティファクトを配置します。Pages設定を変更するAPIは呼びません。この分岐で二つの配信による上書き競合を避けます。
 
 ワークフローは`contents: read`、`pages: write`、`id-token: write`だけを要求します。ビルド時のnpmインストールは不要です。canonical・サイトマップ・OGPのURLは `https://uni-tadayasu.github.io/world/` を使用します。ドメイン変更時は`index.html`のhead、`about.html`、`robots.txt`、`sitemap.xml`を合わせて更新してください。
 
