@@ -1,5 +1,7 @@
+import {getOnlineOrigin} from './site-config.js';
 import {createMaterialLibrary,createVegetationDetail} from './materials.js';
 import {createTraffic} from './traffic.js';
+import {createWalkSurfaceIndex} from './walk-surfaces.js';
 /* Real street geometry from OpenStreetMap. Facades and interiors remain game representations. */
 const ENDPOINT = 'https://overpass.private.coffee/api/interpreter';
 const CACHE_KEY = 'machi-realworld-osm-v1';
@@ -20,7 +22,7 @@ export async function createRealWorld(THREE, { latitude, longitude, radius = 250
   onProgress(cached ? '保存済みの実際の街データを開いています…' : '現在地周辺の道路・建物データを取得しています…', .1);
   if (!data) {
     const started=Date.now(),deadline=started+55000;
-    const canonical='https://machi-life.hisa-0128-1996.chatgpt.site';
+    const canonical=getOnlineOrigin();
     const origin=typeof location!=='undefined'?location.origin:'';
     const proxyOrigin=origin===canonical?origin:canonical;
     const params=new URLSearchParams({lat:options.latitude.toFixed(7),lon:options.longitude.toFixed(7),radius:String(options.radius)});
@@ -85,6 +87,7 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   const colliders=[], interactables=[], buildings=[], mapFeatures={roads:[],areas:[],origin:{x:0,z:0}};
   const resources={geometries:new Set(),materials:new Set(),textures:new Set()};
   const bounds={minX:-radius,maxX:radius,minZ:-radius,maxZ:radius};
+  const walkSurfaces=createWalkSurfaceIndex({bounds}),sampleGround=walkSurfaces.sampleGround;
   const cosLat=Math.max(.015,Math.cos(latitude*Math.PI/180));
   const toLocal=(lat,lon)=>({x:wrappedLon(lon-longitude)*Math.PI/180*EARTH_RADIUS*cosLat,z:-(lat-latitude)*Math.PI/180*EARTH_RADIUS});
   const toGeo=(x,z)=>({latitude:latitude-z/EARTH_RADIUS*180/Math.PI,longitude:normalizeLon(longitude+x/(EARTH_RADIUS*cosLat)*180/Math.PI)});
@@ -97,6 +100,22 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   const windowMat=material('#73908e',{roughness:.18,metalness:.38,emissive:'#576c67',emissiveIntensity:.08},'glass');
   const railMat=material('#4d5f59',{metalness:.3,roughness:.6},'metal'),frameMat=material('#78817b',{metalness:.3,roughness:.5},'metal'),sillMat=material('#c8c7bc'),roadPaint=material('#e0ded0',{roughness:.97});
   const leafMat=material('#6e8754',{},'leaf'), trunkMat=material('#75664d',{},'bark');
+  const taggedMaterials=new Map();
+  const materialKinds={brick:['brick','#ad7c66'],wood:['wood','#967753'],timber:['wood','#967753'],concrete:['stone','#bdbdb5'],cement:['stone','#bdbdb5'],stone:['stone','#aaa79d'],sandstone:['stone','#c8b796'],limestone:['stone','#c9c5b5'],plaster:['plaster','#d7d2c8'],glass:['glass','#87a1a7'],metal:['metal','#8b9598'],steel:['metal','#90989a'],aluminium:['metal','#a6aeb0'],zinc:['metal','#8c9998'],copper:['metal','#9b9276'],roof_tiles:['brick','#9f6850'],tile:['brick','#9f6850'],slate:['stone','#59656c'],tar_paper:['asphalt','#474e4d'],asphalt:['asphalt','#59615f'],thatch:['grass','#b6a071']};
+  function mappedMaterial(tags,prefix,fallback){
+    const rawColor=String(tags[`${prefix}:colour`]||tags[`${prefix}:color`]||'').trim().toLowerCase(),colorName=rawColor.replace(/[_\s]/g,'');
+    const color=/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/.test(rawColor)?rawColor:Object.hasOwn(THREE.Color.NAMES,colorName)?colorName:null;
+    const materialTag=String(tags[`${prefix}:material`]||'').toLowerCase(),spec=materialKinds[materialTag];
+    if(!color&&!spec)return {material:fallback,color:null,materialTag:null};
+    const kind=spec?.[0]||'stone',tint=color||spec[1],key=`${kind}:${tint}`;
+    if(!taggedMaterials.has(key))taggedMaterials.set(key,material(tint,{},kind));
+    return {material:taggedMaterials.get(key),color,materialTag:spec?materialTag:null};
+  }
+  function roadMaterial(tags,fallback){
+    const surfaces={paving_stones:['paving','#b5b1a0'],concrete:['stone','#bfc0b6'],'concrete:plates':['paving','#b8b9b0'],cobblestone:['stone','#9e9b8d'],sett:['paving','#a4a294'],gravel:['stone','#9e9986'],fine_gravel:['stone','#b0a88d'],compacted:['stone','#aaa187'],dirt:['stone','#978165'],earth:['stone','#978165'],sand:['stone','#c3b492'],grass:['grass','#82976a'],wood:['wood','#957a57'],asphalt:['asphalt','#626d6b']};
+    const spec=surfaces[tags.surface];if(!spec)return fallback;
+    const key=`road:${tags.surface}`;if(!taggedMaterials.has(key))taggedMaterials.set(key,material(spec[1],{},spec[0]));return taggedMaterials.get(key);
+  }
   const batches=new Map(), instances=new Map();
   function addGeometry(geometry,materials){
     const geo=geometry.index?geometry.toNonIndexed():geometry;
@@ -122,13 +141,50 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     for(const hole of holes)shape.holes.push(new THREE.Path(hole.map(p=>new THREE.Vector2(p.x,-p.z))));
     return shape;
   }
-  function areaMesh(points,holes,mat,offset=.02){
+  function roofProfile(points,tags,totalHeight,minHeight){
+    const shape=tags['roof:shape'],statedHeight=numberTag(tags['roof:height']);
+    // A mapped roof shape without a usable rise remains flat; missing dimensions
+    // are never promoted to surveyed geometry. All heights include the roof.
+    if(!['gabled','skillion','pyramidal'].includes(shape)||!(statedHeight>0&&statedHeight<totalHeight-minHeight-1))return null;
+    if(shape==='pyramidal'){
+      let turn=0;for(let i=0;i<points.length;i++){const a=points[i],b=points[(i+1)%points.length],c=points[(i+2)%points.length],cross=(b.x-a.x)*(c.z-b.z)-(b.z-a.z)*(c.x-b.x);if(Math.abs(cross)<1e-5)continue;if(turn&&Math.sign(cross)!==turn)return null;turn=Math.sign(cross);}
+      return {shape,height:statedHeight,center:polygonCentroid(points)};
+    }
+    let longest=0,axis={x:1,z:0};for(let i=0;i<points.length;i++){const a=points[i],b=points[(i+1)%points.length],length=Math.hypot(b.x-a.x,b.z-a.z);if(length>longest){longest=length;axis={x:(b.x-a.x)/length,z:(b.z-a.z)/length};}}
+    let across=tags['roof:orientation']==='across'?axis:{x:-axis.z,z:axis.x};
+    const compass={N:0,NE:45,E:90,SE:135,S:180,SW:225,W:270,NW:315},direction=String(tags['roof:direction']??'').trim().toUpperCase();
+    const angle=Object.hasOwn(compass,direction)?compass[direction]:direction!==''&&/^\d+(\.\d+)?$/.test(direction)?Number(direction):null;
+    if(angle!==null&&angle<=360)across={x:Math.sin(angle*Math.PI/180),z:-Math.cos(angle*Math.PI/180)};
+    const project=p=>p.x*across.x+p.z*across.z,values=points.map(project),low=Math.min(...values),high=Math.max(...values),mid=(low+high)/2;
+    if(high-low<.1)return null;
+    const at=p=>statedHeight*Math.max(0,Math.min(1,shape==='skillion'?(high-project(p))/(high-low):1-Math.abs(project(p)-mid)/((high-low)/2)));
+    const sections=shape==='gabled'?[clipAtRoofRidge(points,project,mid,1),clipAtRoofRidge(points,project,mid,-1)]:[points];
+    return {shape,height:statedHeight,at,project,mid,sections};
+  }
+  function clipAtRoofRidge(points,project,mid,sign){
+    const out=[];for(let i=0;i<points.length;i++){const a=points[i],b=points[(i+1)%points.length],da=(project(a)-mid)*sign,db=(project(b)-mid)*sign;if(da>=-1e-8)out.push(a);if((da>1e-8&&db<-1e-8)||(da<-1e-8&&db>1e-8)){const t=da/(da-db);out.push({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});}}return out;
+  }
+  function addMappedRoof(points,profile,base,roof,wall){
+    if(profile.shape==='pyramidal'){
+      const p=[],uv=[],center=profile.center;for(let i=0;i<points.length;i++){let a=points[i],b=points[(i+1)%points.length];if((b.x-a.x)*(center.z-a.z)-(b.z-a.z)*(center.x-a.x)>0)[a,b]=[b,a];p.push(a.x,base,a.z,b.x,base,b.z,center.x,base+profile.height,center.z);uv.push(a.x/3,a.z/3,b.x/3,b.z/3,center.x/3,center.z/3);}
+      const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();addGeometry(geo,roof);return;
+    }
+    for(const section of profile.sections){if(section.length<3)continue;const geo=new THREE.ShapeGeometry(polygonShape(section));geo.rotateX(-Math.PI/2);const attr=geo.attributes.position;for(let i=0;i<attr.count;i++)attr.setY(i,base+profile.at({x:attr.getX(i),z:attr.getZ(i)}));geo.computeVertexNormals();addGeometry(geo,roof);}
+    const p=[],uv=[],orientation=Math.sign(polygonArea(points))||1;
+    for(let i=0;i<points.length;i++){
+      const a=points[i],b=points[(i+1)%points.length],edge=[a];
+      if(profile.shape==='gabled'){const da=profile.project(a)-profile.mid,db=profile.project(b)-profile.mid;if(da*db<-1e-8){const t=da/(da-db);edge.push({x:a.x+(b.x-a.x)*t,z:a.z+(b.z-a.z)*t});}}edge.push(b);
+      for(let j=1;j<edge.length;j++){let c=edge[j-1],d=edge[j];if(orientation<0)[c,d]=[d,c];const ch=profile.at(c),dh=profile.at(d);if(ch+dh<1e-8)continue;const verts=[[c,0],[c,ch],[d,0],[d,0],[c,ch],[d,dh]];for(const [v,h] of verts){p.push(v.x,base+h,v.z);uv.push(Math.hypot(v.x-c.x,v.z-c.z)/3,h/3);}}
+    }
+    if(p.length){const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();addGeometry(geo,wall);}
+  }
+  function areaMesh(points,holes,mat,offset=.02,surface=null){
     if(points.length<3)return;
     const geometry=new THREE.ShapeGeometry(polygonShape(points,holes));geometry.rotateX(-Math.PI/2);
     const attr=geometry.attributes.position;for(let i=0;i<attr.count;i++)attr.setY(i,terrainHeight(attr.getX(i),attr.getZ(i))+offset);
-    geometry.computeVertexNormals();addGeometry(geometry,mat);
+    geometry.computeVertexNormals();if(surface)walkSurfaces.addGeometry(geometry,surface);addGeometry(geometry,mat);
   }
-  function ribbon(points,width,mat,offset=.045){
+  function ribbon(points,width,mat,offset=.045,surface=null){
     const p=[],uv=[];
     for(let i=1;i<points.length;i++){
       const a=points[i-1],b=points[i],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz);if(len<.05)continue;
@@ -139,19 +195,46 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
         for(const k of [0,2,1,1,2,3]){const c=corners[k];p.push(c.x,terrainHeight(c.x,c.z)+offset,c.z);uv.push(c.x/5,c.z/5);}
       }
     }
-    if(!p.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();addGeometry(geo,mat);
+    if(!p.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();if(surface)walkSurfaces.addGeometry(geo,surface);addGeometry(geo,mat);
+  }
+  function stairRibbon(points,width,id){
+    // OSM locates the stairway; only available elevation can establish its rise.
+    // Individual tread heights/counts remain a rendering estimate, not a survey.
+    if(!terrain){ribbon(points,width,pathMat,.049,{kind:'path',id});return 0;}
+    let treadCount=0;
+    for(let i=1;i<points.length;i++){
+      const a=points[i-1],b=points[i],dx=b.x-a.x,dz=b.z-a.z,length=Math.hypot(dx,dz),rise=terrainHeight(b.x,b.z)-terrainHeight(a.x,a.z);
+      if(length<.05)continue;
+      if(Math.abs(rise)<.08){ribbon([a,b],width,pathMat,.049,{kind:'path',id});continue;}
+      const count=Math.min(400,Math.max(1,Math.ceil(Math.abs(rise)/.16))),nx=-dz/length*width/2,nz=dx/length*width/2,p=[],uv=[];
+      const vertex=(v,y)=>{p.push(v.x,y,v.z);uv.push(v.x/2,v.z/2);};
+      let previousHeight=null;
+      for(let j=0;j<count;j++){
+        const aa={x:a.x+dx*j/count,z:a.z+dz*j/count},bb={x:a.x+dx*(j+1)/count,z:a.z+dz*(j+1)/count};
+        const corners=[{x:aa.x+nx,z:aa.z+nz},{x:aa.x-nx,z:aa.z-nz},{x:bb.x+nx,z:bb.z+nz},{x:bb.x-nx,z:bb.z-nz}];
+        const height=Math.max(...corners.map(c=>terrainHeight(c.x,c.z)))+.049;
+        for(const k of [0,2,1,1,2,3])vertex(corners[k],height);
+        // Vertical risers are visible, but cannot be returned as walking support.
+        const low=previousHeight??Math.min(...corners.slice(0,2).map(c=>terrainHeight(c.x,c.z)));
+        vertex(corners[0],height);vertex(corners[1],height);vertex(corners[0],low);vertex(corners[0],low);vertex(corners[1],height);vertex(corners[1],low);
+        previousHeight=height;treadCount++;
+      }
+      const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();walkSurfaces.addGeometry(geo,{kind:'steps',id});addGeometry(geo,pathMat);
+    }
+    return treadCount;
   }
   // Elevations are relative to the starting location; no added absolute elevation offset.
   const groundGeo=new THREE.PlaneGeometry(radius*2,radius*2,96,96);groundGeo.rotateX(-Math.PI/2);
   const groundPos=groundGeo.attributes.position;
   for(let i=0;i<groundPos.count;i++)groundPos.setY(i,terrainHeight(groundPos.getX(i),groundPos.getZ(i))-.015);
   groundGeo.computeVertexNormals();resources.geometries.add(groundGeo);
+  walkSurfaces.addGeometry(groundGeo,{kind:'terrain',id:'elevation-mesh'});
   const groundMaterial=material('#b5b7a1',{},'grass');library.apply(groundMaterial,'grass',{preserveMap:false,repeat:new THREE.Vector2(radius/4,radius/4)});
   const ground=new THREE.Mesh(groundGeo,groundMaterial);ground.receiveShadow=true;group.add(ground);
   const nodes=data.elements.filter(e=>e.type==='node'&&Number.isFinite(e.lat)&&Number.isFinite(e.lon)).map(e=>({...e,point:toLocal(e.lat,e.lon)}));
   const ways=data.elements.filter(e=>e.type==='way'&&Array.isArray(e.geometry)&&e.geometry.length>1).map(e=>({...e,points:cleanPoints(e.geometry.map(p=>toLocal(p.lat,p.lon))),linePoints:e.geometry.map(p=>toLocal(p.lat,p.lon))}));
   const insideCoverage=p=>Math.abs(p.x)<=radius+80&&Math.abs(p.z)<=radius+80;
-  let areaCount=0, inferredHeightCount=0, mappedHeightCount=0, windowCount=0, detailedWindowCount=0, sceneryTrees=0;
+  let areaCount=0, inferredHeightCount=0, mappedHeightCount=0, windowCount=0, detailedWindowCount=0, sceneryTrees=0,stairwayCount=0,renderedTreadCount=0,mappedAppearanceCount=0,mappedRoofCount=0,mappedRoadSurfaceCount=0;
   const greenAreas=[], waterAreas=[];
   const areaMats=new Map();
   function drawArea(points,holes,tags,id){
@@ -161,7 +244,7 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     const isGreen=tags.leisure==='park'||tags.leisure==='garden'||['wood','scrub','wetland'].includes(tags.natural)||['forest','grass','meadow','recreation_ground','village_green','allotments','orchard'].includes(tags.landuse);
     const color=isWater?'#7da4a1':isGreen?'#8da078':tags.natural==='beach'?'#c6bda1':['farmland','farmyard'].includes(tags.landuse)?'#aaa581':['industrial','commercial','retail'].includes(tags.landuse)?'#bbb9aa':['pitch','playground','sports_centre'].includes(tags.leisure)?'#99ad8f':'#b8b8a6';
     let mat=areaMats.get(color);if(!mat){mat=isWater?waterMat:material(color);areaMats.set(color,mat);}
-    areaMesh(points,holes,mat,isWater?.035:.018);
+    areaMesh(points,holes,mat,isWater?.035:.018,isWater?null:{kind:isGreen?'grass':'area',id});
     mapFeatures.areas.push({id,points,holes,color,water:isWater});areaCount++;
     if(isGreen)greenAreas.push({points,holes,id});
     if(isWater){waterAreas.push({points,holes});const box=polygonBounds(points);colliders.push({...box,polygon:points,holes,type:'water'});}
@@ -182,9 +265,11 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
       const roadType=t.highway,width=roadWidth(t),pedestrian=['footway','path','pedestrian','cycleway','steps','bridleway'].includes(roadType);
       const fragments=clipPolyline(way.linePoints,bounds);
       for(let part=0;part<fragments.length;part++){const points=fragments[part];
-        mapFeatures.roads.push({id:`osm-way-${way.id}-${part}`,name:t.name||'',points,width,type:roadType,inferredWidth:!t.width,oneWay:t.oneway||'no',foot:t.foot||'',bridge:t.bridge==='yes',sidewalk:t.sidewalk||''});
-        if(!pedestrian)ribbon(points,width+1.7,sidewalk,.037);
-        ribbon(points,width,pedestrian?pathMat:asphalt,pedestrian?.049:.059);
+        const id=`osm-way-${way.id}-${part}`;
+        const road={id,name:t.name||'',points,width,type:roadType,inferredWidth:!t.width,oneWay:t.oneway||'no',foot:t.foot||'',bridge:t.bridge==='yes',sidewalk:t.sidewalk||'',surface:t.surface||null};mapFeatures.roads.push(road);
+        if(!pedestrian&&!['no','none'].includes(t.sidewalk))ribbon(points,width+1.7,sidewalk,.037,{kind:'sidewalk',id});
+        if(roadType==='steps'){const count=stairRibbon(points,width,id);stairwayCount++;renderedTreadCount+=count;road.stairElevation=count?'terrain-estimate':'unavailable';}
+        else {const fallback=pedestrian?pathMat:asphalt,finish=roadMaterial(t,fallback);if(finish!==fallback)mappedRoadSurfaceCount++;ribbon(points,width,finish,pedestrian?.049:.059,{kind:pedestrian?'path':'road',id});}
         // Generic lane detail follows mapped geometry; it is decorative, not a record of local markings.
         if(!pedestrian&&width>=6&&roadType!=='service')for(let j=1;j<points.length;j++){const a=points[j-1],b=points[j],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz),yaw=Math.atan2(dx,dz);if(len<8)continue;for(let d=3;d<len-3;d+=8){const x=a.x+dx*d/len,z=a.z+dz*d/len;instance(unitBox,roadPaint,x,terrainHeight(x,z)+.07,z,.095,.008,2.4,yaw);}}
       }
@@ -208,25 +293,28 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     const heightSource=explicitHeight>1500?'estimated':explicitHeight?'height':levels?'levels':'estimated';heightSource==='estimated'?inferredHeightCount++:mappedHeightCount++;
     const minHeight=Math.max(0,Math.min(height-1,numberTag(t.min_height)||numberTag(t['building:min_level'])*3.05||0));
     const baseY=terrainHeight(center.x,center.z)+minHeight;
-    const hash=hashId(way.id),wall=wallPalette[hash%wallPalette.length],roof=roofPalette[hash%roofPalette.length];
-    const geometry=new THREE.ExtrudeGeometry(polygonShape(polygon),{depth:height-minHeight,bevelEnabled:false,steps:1,curveSegments:1});
+    const hash=hashId(way.id),wallAppearance=mappedMaterial(t,'building',wallPalette[hash%wallPalette.length]),roofAppearance=mappedMaterial(t,'roof',roofPalette[hash%roofPalette.length]),wall=wallAppearance.material,roof=roofAppearance.material;
+    if(wallAppearance.color||wallAppearance.materialTag||roofAppearance.color||roofAppearance.materialTag)mappedAppearanceCount++;
+    const profile=roofProfile(polygon,t,height,minHeight),wallHeight=height-minHeight-(profile?.height||0);
+    const geometry=new THREE.ExtrudeGeometry(polygonShape(polygon),{depth:wallHeight,bevelEnabled:false,steps:1,curveSegments:1});
     geometry.rotateX(-Math.PI/2);geometry.translate(0,baseY,0);addGeometry(geometry,[roof,wall]);
+    if(profile){addMappedRoof(polygon,profile,baseY+wallHeight,roof,wall);mappedRoofCount++;}
     const isPart=!t.building&&Boolean(t['building:part']);
     const poi=nodes.find(n=>(n.tags?.shop||n.tags?.amenity)&&pointInPolygon(n.point,polygon));
     const combined={...(poi?.tags||{}),...t};
     const type=classifyBuilding(combined);
     const actualName=t.name||poi?.tags?.name||t['addr:housename'];
     const name=actualName||({home:'住宅',cafe:'飲食店',market:'店舗',office:'建物',gallery:'文化施設',bookstore:'書店'}[type]);
-    const record={id:`osm-way-${way.id}`,name,type,interiorId:type,x:center.x,z:center.z,w:box.maxX-box.minX,d:box.maxZ-box.minZ,mapColor:wall.color.getStyle(),polygon,height,heightSource,baseY,tags:combined,osmId:way.id,actualName:Boolean(actualName),entrance:null};
+    const record={id:`osm-way-${way.id}`,name,type,interiorId:type,x:center.x,z:center.z,w:box.maxX-box.minX,d:box.maxZ-box.minZ,mapColor:wall.color.getStyle(),polygon,height,heightSource,baseY,tags:combined,osmId:way.id,actualName:Boolean(actualName),entrance:null,appearance:{wallColour:wallAppearance.color,wallMaterial:wallAppearance.materialTag,roofColour:roofAppearance.color,roofMaterial:roofAppearance.materialTag,roofShape:profile?.shape||'flat',roofHeight:profile?.height||0,roofShapeSource:profile?'mapped':t['roof:shape']==='flat'?'mapped':'simplified'}};
     const collider={...box,polygon,type:'building',buildingId:record.id};colliders.push(collider);
     if(!isPart)buildingRecords.push(record);
     // Facade windows are deliberately generic; actual footprint and height tags remain intact.
     if(height>=4&&!['shed','garage','garages','warehouse','roof'].includes(t.building)){
-      const floors=Math.min(18,Math.floor((height-minHeight-1)/3.05)),orientation=Math.sign(polygonArea(polygon))||1;
+      const floors=Math.min(18,Math.floor((wallHeight-1)/3.05)),orientation=Math.sign(polygonArea(polygon))||1;
       for(let i=0;i<polygon.length;i++){
         const a=polygon[i],b=polygon[(i+1)%polygon.length],dx=b.x-a.x,dz=b.z-a.z,len=Math.hypot(dx,dz);if(len<3)continue;
         const columns=Math.min(25,Math.floor((len-1.1)/3)),nx=dz/len*orientation,nz=-dx/len*orientation,yaw=Math.atan2(dx,dz)-Math.PI/2;
-        if(Math.hypot(center.x,center.z)<180){const x=(a.x+b.x)/2+nx*.025,z=(a.z+b.z)/2+nz*.025;instance(unitBox,sillMat,x,baseY+height-minHeight-.12,z,len,.2,.14,yaw);instance(unitBox,roof,x,baseY+.18,z,len,.35,.1,yaw);}
+        if(Math.hypot(center.x,center.z)<180){const x=(a.x+b.x)/2+nx*.025,z=(a.z+b.z)/2+nz*.025;instance(unitBox,sillMat,x,baseY+wallHeight-.12,z,len,.2,.14,yaw);instance(unitBox,roof,x,baseY+.18,z,len,.35,.1,yaw);}
         for(let col=0;col<columns&&windowCount<10000;col++)for(let floor=0;floor<floors&&windowCount<10000;floor++){
           const ratio=(col+1)/(columns+1),x=a.x+dx*ratio+nx*.035,z=a.z+dz*ratio+nz*.035;
           const w=Math.min(1.4,len/(columns+1)*.56),y=baseY+1.8+floor*3.05;instance(unitBox,windowMat,x,y,z,w,1.35,.075,yaw);windowCount++;
@@ -290,7 +378,7 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
     }
     if(!found){const first=interactables.find(i=>clearPoint(i.position,.55));if(first)spawnPoint={x:first.position.x,z:first.position.z};}
   }
-  if(!clearPoint(spawnPoint,.5)){for(const geometry of resources.geometries)geometry.dispose();for(const mat of resources.materials)mat.dispose();throw new Error('この取得範囲内に歩ける屋外の開始位置を見つけられませんでした。近くの屋外地点を選んでください。');}
+  if(!clearPoint(spawnPoint,.5)){walkSurfaces.dispose();library.dispose();for(const geometry of resources.geometries)geometry.dispose();for(const mat of resources.materials)mat.dispose();throw new Error('この取得範囲内に歩ける屋外の開始位置を見つけられませんでした。近くの屋外地点を選んでください。');}
   const offset=Math.hypot(spawnPoint.x,spawnPoint.z);
   const spawn={...spawnPoint,yaw:0};
   const gpsMat=new THREE.MeshBasicMaterial({color:'#f2cb66',side:THREE.DoubleSide,transparent:true,opacity:.9});resources.materials.add(gpsMat);
@@ -305,7 +393,9 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   ];
   if(offset>.5)notes.push(`取得した現在地が建物・水域内に重なるため、開始位置を約${Math.round(offset)}m先の屋外へ移しています。元の現在地は地図の印で示します。`);
   if(!buildings.length&&!mapFeatures.roads.length)notes.push('この範囲の道路・建物は地図に記録されていないか、取得範囲に含まれていません。');
-  const traffic=createTraffic(THREE,{roads:mapFeatures.roads,colliders,terrainHeight:(x,z)=>terrainHeight(x,z)+.06,bounds,quality:'high',leftHandTraffic:latitude>=24&&latitude<=46&&longitude>=122&&longitude<=146});
+  if(stairwayCount)notes.push(renderedTreadCount?'地図にある階段は取得した地形の高低差から段を描画しています。段数・段高は実測値ではありません。':'地図に階段の記録がありますが、利用できる高低差がないため平面で表示しています。');
+  if(mappedAppearanceCount||mappedRoofCount||mappedRoadSurfaceCount)notes.push('記録のある建物の外壁・屋根の色と素材、寸法がある単純な屋根形状、道路の舗装種別を反映しています。素材の細部はゲーム用の表現です。');
+  const traffic=createTraffic(THREE,{roads:mapFeatures.roads,colliders,terrainHeight:(x,z)=>sampleGround(x,z)?.height??terrainHeight(x,z),bounds,quality:'high',leftHandTraffic:latitude>=24&&latitude<=46&&longitude>=122&&longitude<=146});
   group.add(traffic.group);interactables.push(...traffic.interactables);
   const vegetation=createVegetationDetail(THREE,{trees:treeRecords,heightAt:terrainHeight,quality:'high'});group.add(vegetation.group);
   notes.push(traffic.sourceInfo.note);
@@ -313,14 +403,14 @@ export function buildRealWorldFromData(THREE, data, input = {}) {
   const sourceInfo={
     source:'OpenStreetMap',attribution:'© OpenStreetMap contributors',licenseUrl:'https://www.openstreetmap.org/copyright',endpoint:ENDPOINT,
     dataTimestamp:data.osm3s?.timestamp_osm_base||null,coverageMeters:radius,radius,buildingCount:buildings.length,roadCount:mapFeatures.roads.length,areaCount,
-    mappedHeightCount,inferredHeightCount,terrain:terrain?'elevation':'flat',terrainSource,spawnOffsetMeters:offset,origin:{x:0,z:0},
+    mappedHeightCount,inferredHeightCount,terrain:terrain?'elevation':'flat',terrainSource,spawnOffsetMeters:offset,origin:{x:0,z:0},stairwayCount,renderedTreadCount,mappedAppearanceCount,mappedRoofCount,mappedRoadSurfaceCount,
     traffic:traffic.sourceInfo,rendering:'PBR surfaces, smooth canopies and nearby leaf geometry',facades:'procedural',roadMarkings:'procedural decoration, not observed road markings',interiors:'game templates',vegetation:'mapped trees and procedural planting within mapped green areas',note:notes.join(' '),cached:false
   };
-  function dispose(){if(disposed)return;disposed=true;traffic.dispose();vegetation.dispose();library.dispose();group.removeFromParent();group.clear();for(const geo of resources.geometries)geo.dispose();for(const mat of resources.materials)mat.dispose();for(const t of resources.textures)t.dispose();}
+  function dispose(){if(disposed)return;disposed=true;traffic.dispose();vegetation.dispose();walkSurfaces.dispose();library.dispose();group.removeFromParent();group.clear();for(const geo of resources.geometries)geo.dispose();for(const mat of resources.materials)mat.dispose();for(const t of resources.textures)t.dispose();}
   function update(dt,hour=12,focus){if(disposed)return;if(focus&&Number.isFinite(focus.x)&&Number.isFinite(focus.z))observer=focus;windowMat.emissiveIntensity=hour<6||hour>=18?.34:.08;traffic.update(dt,hour,observer);vegetation.update(observer);}
   function setQuality(tier){library.setQuality(tier);for(const child of group.children)if(child.isMesh)library.updateGeometry(child);traffic.setQuality(tier);vegetation.setQuality(tier);}
   update(0,12,observer);
-  return {group,colliders,interactables,buildings,bounds,spawn,update,radius,label:'現在地の街',geo:{latitude,longitude},toGeo,terrainHeight,sourceInfo,dispose,setQuality,trafficStats:traffic.getStats,trafficSnapshot:traffic.snapshot,real:true,mapFeatures,originMarker:{x:0,z:0,spawnOffsetMeters:offset}};
+  return {group,colliders,interactables,buildings,bounds,spawn,sampleGround,update,radius,label:'現在地の街',geo:{latitude,longitude},toGeo,toLocal,terrainHeight,sourceInfo,dispose,setQuality,trafficStats:traffic.getStats,trafficSnapshot:traffic.snapshot,real:true,mapFeatures,originMarker:{x:0,z:0,spawnOffsetMeters:offset}};
 }
 
 function validateOptions({latitude,longitude,radius=250,terrain}={}){

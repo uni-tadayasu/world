@@ -1,3 +1,4 @@
+import {placeHumanoidFoot} from './model-motion.js';
 /** Local articulated avatars. Image reconstruction is an approximate visual hull,
  * not a recovered scan: unseen surfaces and joints are estimated explicitly. */
 export function createAvatar(THREE) {
@@ -195,19 +196,38 @@ export function createAvatar(THREE) {
     style={...style,...changes};importSequence++;swap(procedural());
   }
   function triangleCount(root){let count=0;root.traverse(o=>{if(o.isMesh&&o.geometry)count+=(o.geometry.index?o.geometry.index.count:o.geometry.attributes.position.count)/3;});return Math.round(count);}
-  function update(dt,{moving=false,running=false,jumping=false,speed=0}={}){
+  function update(dt,{moving=false,running=false,jumping=false,speed=0,grounded=!jumping,groundHeightAt}={}){
     if(!current)return;dt=Math.min(.1,Math.max(0,Number(dt)||0));idleTime+=dt;
     const motion=moving?Math.min(1,Math.max(.25,(Number(speed)||3)/(running?5:3))):0;
     if(moving)phase+=dt*(running?10.8:7.2);
     const blend=Math.min(1,dt*12),swing=Math.sin(phase)*motion;
     const lerp=(object,key,target)=>{object[key]+=(target-object[key])*blend;};
-    lerp(current.body.position,'y',moving?Math.abs(Math.sin(phase*2))*(running?.034:.016):Math.sin(idleTime*1.7)*.004);
+    current.gaitBodyY??=0;lerp(current,'gaitBodyY',-.02+(moving?Math.abs(Math.sin(phase*2))*(running?.034:.016):Math.sin(idleTime*1.7)*.004));current.body.position.y=current.gaitBodyY;
     lerp(current.torso.rotation,'x',running&&moving?-.075:Math.sin(idleTime*1.4)*.007);
     lerp(current.head.rotation,'y',moving?Math.sin(phase*.5)*.018:Math.sin(idleTime*.4)*.035);
     lerp(current.body.rotation,'z',moving?-Math.sin(phase)*.011:0);lerp(current.pelvis.rotation,'y',moving?Math.sin(phase)*.024:0);
     lerp(current.head.rotation,'x',moving?-.009:Math.sin(idleTime*.65)*.009);
-    current.legs.forEach((l,i)=>{const sign=i===0?1:-1;lerp(l.upper.rotation,'x',jumping?.32:sign*swing*(running?.77:.49));lerp(l.lower.rotation,'x',jumping?-.58:-Math.max(0,-sign*swing)*(running?1.03:.65));lerp(l.foot.rotation,'x',jumping?.1:Math.max(0,sign*swing)*.11);});
+    current.legs.forEach((l,i)=>{const sign=i===0?1:-1;
+      l.gait??={upper:0,lower:0,foot:0};lerp(l.gait,'upper',jumping?.32:sign*swing*(running?.77:.49));lerp(l.gait,'lower',jumping?-.58:-Math.max(0,-sign*swing)*(running?1.03:.65));lerp(l.gait,'foot',jumping?.1:Math.max(0,sign*swing)*.11);
+      l.upper.rotation.set(l.gait.upper,0,0);l.lower.rotation.set(l.gait.lower,0,0);l.foot.rotation.set(l.gait.foot,0,0);
+    });
     current.arms.forEach((a,i)=>{const sign=i===0?1:-1;lerp(a.upper.rotation,'x',jumping?-.45:-sign*swing*(running?.69:.34));lerp(a.upper.rotation,'z',a.side*(jumping?.22:.065));lerp(a.lower.rotation,'x',running&&moving?-.9:-.12-Math.max(0,sign*swing)*.17);});
+    if(grounded&&!jumping&&typeof groundHeightAt==='function'){
+      group.updateWorldMatrix(true,true);const frame=group.getWorldQuaternion(new THREE.Quaternion()),base=group.getWorldPosition(new THREE.Vector3()).y;
+      const placements=[];let requiredDrop=0;
+      for(const l of current.legs){const foot=l.foot.getWorldPosition(new THREE.Vector3()),height=groundHeightAt(foot.x,foot.z);if(!Number.isFinite(height)||Math.abs(height-base)>.4)continue;
+        const target=foot.clone(),lift=moving?Math.min(running?.22:.14,Math.max(0,foot.y-base-.1)):0;target.y=height+.1+lift;
+        const hip=l.upper.getWorldPosition(new THREE.Vector3()),knee=l.lower.getWorldPosition(new THREE.Vector3()),reach=hip.distanceTo(knee)+knee.distanceTo(foot)-.004;
+        const verticalReach=Math.sqrt(Math.max(0,reach*reach-(target.x-hip.x)**2-(target.z-hip.z)**2));
+        requiredDrop=Math.max(requiredDrop,hip.y-target.y-verticalReach);placements.push({l,target});
+      }
+      // Gait bob and terrain offset are separate: a lower tread must bend the
+      // pelvis, never accumulate an offset or stretch the leg past its length.
+      current.footDrop??=0;lerp(current,'footDrop',Math.max(0,Math.min(.22,requiredDrop)));
+      current.body.position.y=current.gaitBodyY-current.footDrop;group.updateWorldMatrix(true,true);
+      for(const {l,target} of placements){const foot=l.foot.getWorldPosition(new THREE.Vector3());if(Math.abs(target.y-foot.y)>.002&&Math.abs(target.y-foot.y)<.45)placeHumanoidFoot(THREE,l.upper,l.lower,l.foot,target,frame,-1);}
+      group.updateWorldMatrix(true,true);
+    }else current.footDrop=0;
   }
   const waitFrame=()=>new Promise(resolve=>setTimeout(resolve,0));
   function prepareView(image,maxImage,name){

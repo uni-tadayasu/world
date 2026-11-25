@@ -1,7 +1,9 @@
-/** One profile authority: guest storage, or the authenticated social profile. */
-const ONLINE_ORIGIN='https://machi-life.hisa-0128-1996.chatgpt.site';
+/** Browser-local drafts and a separate anonymous device profile authority. */
+import {readDeviceSession} from './device-session.js';
+import {getOnlineOrigin,isOnlineHost} from './site-config.js';
 const GUEST_KEY='machi.profile.guest.v1';
-const ACCOUNT_PREFIX='machi.profile.account.';
+const DEVICE_PREFIX='machi.profile.device.';
+const TITLE_BADGE_ICON='<svg class="profile-title-glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3 8 3v6c0 4-3.5 7-8 9-4.5-2-8-5-8-9V6l8-3Z"/><path d="m12 8 3 4-3 4-3-4 3-4Z"/></svg>';
 const EDITABLE=['name','tagline','bio','title','accent','avatarIcon','showName'];
 export const PROFILE_TITLES=Object.freeze(['街の住人','気ままな旅人','散歩好き','カフェ日和','本のある暮らし','部屋づくり好き','のんびり暮らし','街の探索者']);
 export const PROFILE_ICONS=Object.freeze([
@@ -23,7 +25,7 @@ const fields=value=>Object.fromEntries(EDITABLE.map(key=>[key,value[key]]));
 const sameFields=(a,b)=>EDITABLE.every(key=>a?.[key]===b?.[key]);
 const iconExists=id=>PROFILE_ICONS.some(icon=>icon.id===id);
 const contextOf=state=>({scope:state.scope,accountId:state.accountId,version:state.version});
-const keyFor=id=>id?`${ACCOUNT_PREFIX}${id}.v1`:GUEST_KEY;
+const keyFor=id=>id?`${DEVICE_PREFIX}${id}.v1`:GUEST_KEY;
 
 export function ensureProfileStyles(){
   if(typeof document==='undefined'||document.querySelector('link[data-machi-profile]'))return;
@@ -59,7 +61,7 @@ function validate(patch,current){
 }
 
 export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
-  ensureProfileStyles();const hosted=typeof location!=='undefined'&&location.origin===ONLINE_ORIGIN;
+  ensureProfileStyles();const hosted=isOnlineHost(),onlineOrigin=getOnlineOrigin();
   let committed=normalise(),scope='guest',accountId=null,pendingRecord=null,error='',storageError='';
   let disposed=false,verified=!hosted,syncing=false,saving=false,syncPromise=null,savePromise=null,sessionEpoch=0,viewEpoch=0,lastSync=0;
   let shell=null,visible=false,editing=false,draft=null,editContext=null,draftDirty=false,viewedId=null,viewedProfile=null,viewLoading=false;
@@ -77,12 +79,12 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     let legacyName='旅人';
     try{const old=JSON.parse(localStorage.getItem('machi.life.v1')||'null');const name=old?.state?.name||old?.name;if(typeof name==='string'&&!['あなた',''].includes(name.trim()))legacyName=name;}catch(_){}
     const initial=normalise({name:legacyName});
-    // Freeze the guest identity before a later account sign-in can change legacy state.
+    // Keep existing local-only data separate from a later browser identity.
     if(!storageError)try{writeRecord(null,initial);}catch(_){storageError='プロフィールをこのブラウザに保存できません。保存設定を確認してください。';}
     return initial;
   }
   committed=loadGuest();
-  function getState(){return {...committed,scope,signedIn:scope==='account',accountId,verified,syncing,saving,pending:!!pendingRecord,error:error||storageError,hosted};}
+  function getState(){return {...committed,scope,signedIn:scope==='device',connected:scope==='device',identityKind:scope==='device'?'device':'local',accountId,verified,syncing,saving,pending:!!pendingRecord,error:error||storageError,hosted};}
   function emit(){if(disposed)return;const state=getState();try{onChange({...state});}catch(_){}if(typeof window!=='undefined')window.dispatchEvent(new CustomEvent('machi:profile-change',{detail:state}));}
   function currentContext(){return contextOf(getState());}
   function contextMatches(context){return context.scope===scope&&context.accountId===accountId;}
@@ -104,18 +106,18 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     const work=(async()=>{
       try{
         if(!hosted){const latest=loadGuest();if(epoch!==sessionEpoch||disposed)return getState();committed=latest;scope='guest';accountId=null;pendingRecord=null;lastSync=Date.now();return getState();}
-        const result=await api('/me');if(epoch!==sessionEpoch||disposed)return getState();
-        if(typeof result.signedIn!=='boolean'||(result.signedIn&&(typeof result.user?.id!=='string'||typeof result.user?.name!=='string')))throw new Error('アカウントのプロフィールを確認できませんでした。もう一度お試しください。');
+        const result=await readDeviceSession();if(epoch!==sessionEpoch||disposed)return getState();
+        if(typeof result.signedIn!=='boolean'||(result.signedIn&&(typeof result.user?.id!=='string'||typeof result.user?.name!=='string')))throw new Error('このブラウザのプロフィールを確認できませんでした。もう一度接続してください。');
         verified=true;
         const nextId=result.signedIn&&typeof result.user?.id==='string'?result.user.id:null;
-        const changedIdentity=nextId!==accountId||!!nextId!==(scope==='account');
+        const changedIdentity=nextId!==accountId||!!nextId!==(scope==='device');
         if(nextId){
-          const saved=readRecord(nextId);scope='account';accountId=nextId;committed=normalise(result.user);
+          const saved=readRecord(nextId);scope='device';accountId=nextId;committed=normalise(result.user);
           pendingRecord=saved?.pending&&saved.pending.accountId===nextId&&Number.isSafeInteger(saved.pending.expectedVersion)?saved.pending:null;
           if(pendingRecord&&sameFields(normalise(pendingRecord.values),committed))pendingRecord=null;
           if(!storageError)cacheAccount();
         }else{scope='guest';accountId=null;pendingRecord=null;committed=loadGuest();}
-        if(editing&&changedIdentity){if(draftDirty){editing=false;draft=null;editContext=null;error='ログイン状態が変わったため、保存先を切り替えました。プロフィールを確認してから編集してください。';}else beginEdit();}
+        if(editing&&changedIdentity){if(draftDirty){editing=false;draft=null;editContext=null;error='このブラウザの保存先が変わりました。現在のプロフィールを確認してから編集してください。';}else beginEdit();}
         lastSync=Date.now();return getState();
       }catch(failure){if(epoch===sessionEpoch&&!disposed)error=failure.message;return getState();}
     })();
@@ -128,7 +130,7 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     if(syncPromise)await syncPromise;
     if(disposed)return {ok:false,message:'プロフィール画面は閉じられています。'};
     if(savePromise)return {ok:false,message:'プロフィールを保存しています。'};
-    if(!contextMatches(context)){error='ログイン状態が変わりました。現在のプロフィールを確認してから保存してください。';emit();render();return {ok:false,message:error,code:'profile_identity_changed'};}
+    if(!contextMatches(context)){error='このブラウザの保存先が変わりました。現在のプロフィールを確認してから保存してください。';emit();render();return {ok:false,message:error,code:'profile_identity_changed'};}
     let values;try{values=validate(patch,committed);}catch(failure){error=failure.message;render();return {ok:false,message:error};}
     const owner=accountId,epoch=sessionEpoch;saving=true;error='';emit();render();let mustResync=false;
     const work=(async()=>{
@@ -143,10 +145,10 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
           pendingRecord={accountId:owner,expectedVersion:context.version,values};cacheAccount();
           const result=await api('/profile',{method:'POST',data:{...values,expectedUserId:owner,expectedVersion:context.version}});
           if(disposed||epoch!==sessionEpoch||accountId!==owner)return {ok:true,stale:true};
-          if(result.user?.id!==owner){const failure=new Error('保存先のアカウントを確認できませんでした。');failure.code='profile_identity_changed';throw failure;}
+          if(result.user?.id!==owner){const failure=new Error('このブラウザの保存先を確認できませんでした。');failure.code='profile_identity_changed';throw failure;}
           committed=normalise(result.user);pendingRecord=null;cacheAccount();
         }
-        editing=false;draft=null;editContext=null;draftDirty=false;toast(scope==='account'?'プロフィールをアカウントに保存しました。':'プロフィールをこのブラウザに保存しました。');return {ok:true,user:{...committed}};
+        editing=false;draft=null;editContext=null;draftDirty=false;toast(scope==='device'?'プロフィールを保存しました。':'プロフィールをこのブラウザに保存しました。');return {ok:true,user:{...committed}};
       }catch(failure){
         if(disposed||epoch!==sessionEpoch||accountId!==owner)return {ok:false,stale:true,message:failure.message};
         error=failure.message;
@@ -158,8 +160,8 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     try{return await work;}finally{if(savePromise===work)savePromise=null;if(!disposed){saving=false;emit();render();if(mustResync)setTimeout(()=>{if(!disposed)void sync();},0);}}
   }
   function card(profile,{self=false,preview=false}={}){
-    const status=preview?'プロフィールのプレビュー':self?(scope==='account'?'MACHI RESIDENT':'GUEST RESIDENT'):'MACHI RESIDENT';
-    return `<article class="machi-profile-card" style="--profile-accent:${safeAccent(profile.accent)};--profile-accent-ink:${accentInk(profile.accent)}"><div class="profile-card-banner" aria-hidden="true"><span></span><i></i></div><div class="profile-card-content">${profileAvatarMarkup(profile,84)}<p class="profile-card-caption">${status}</p><h3>${esc(profile.name||'旅人')}</h3>${profile.title?`<span class="profile-title-badge">${esc(profile.title)}</span>`:''}${profile.tagline?`<p class="profile-tagline">${esc(profile.tagline)}</p>`:'<p class="profile-tagline placeholder">今日は、どんな一日にしよう。</p>'}<p class="profile-bio ${profile.bio?'':'placeholder'}">${esc(profile.bio||'まだ自己紹介はありません。')}</p>${profile.code?`<div class="profile-friend-code"><span>フレンドコード</span><strong>${esc(profile.code)}</strong></div>`:self?'<div class="profile-friend-code"><span>ゲストのプロフィール</span><strong>このブラウザでの暮らし</strong></div>':''}</div></article>`;
+    const status=preview?'プロフィールのプレビュー':self?(scope==='device'?'MACHI RESIDENT':'LOCAL RESIDENT'):'MACHI RESIDENT';
+    return `<article class="machi-profile-card" style="--profile-accent:${safeAccent(profile.accent)};--profile-accent-ink:${accentInk(profile.accent)}"><div class="profile-card-banner" aria-hidden="true"><span></span><i></i></div><div class="profile-card-content">${profileAvatarMarkup(profile,84)}<p class="profile-card-caption">${status}</p><h3>${esc(profile.name||'旅人')}</h3>${profile.title?`<span class="profile-title-badge">${TITLE_BADGE_ICON}${esc(profile.title)}</span>`:''}${profile.tagline?`<p class="profile-tagline">${esc(profile.tagline)}</p>`:'<p class="profile-tagline placeholder">今日は、どんな一日にしよう。</p>'}<p class="profile-bio ${profile.bio?'':'placeholder'}">${esc(profile.bio||'まだ自己紹介はありません。')}</p>${profile.code?`<div class="profile-friend-code"><span>フレンドコード</span><strong>${esc(profile.code)}</strong></div>`:self?'<div class="profile-friend-code"><span>端末のプロフィール</span><strong>このブラウザでの暮らし</strong></div>':''}</div></article>`;
   }
   function render(){
     if(!isVisible())return;
@@ -170,9 +172,9 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     const busy=syncing||saving;
     if(editing){
       const value=draft||fields(committed);
-      shell.innerHTML=`<div class="profile-editor"><div class="profile-edit-preview">${card({...committed,...value},{self:true,preview:true})}</div><form class="profile-form"><fieldset ${busy?'disabled':''}><label class="profile-label" for="profile-name">表示名<span data-count="name">${length(value.name)} / 24</span></label><input id="profile-name" name="name" type="text" value="${esc(value.name)}" maxlength="48" required autocomplete="off" aria-describedby="profile-name-note"><small id="profile-name-note" class="profile-field-note">ゲームの中で使う名前です。1〜24文字で入力できます。</small><label class="profile-label" for="profile-tagline">ひとこと<span data-count="tagline">${length(value.tagline)} / 60</span></label><input id="profile-tagline" name="tagline" type="text" value="${esc(value.tagline)}" maxlength="120" placeholder="例：気になる喫茶店を探しています" autocomplete="off"><label class="profile-label" for="profile-bio">自己紹介<span data-count="bio">${length(value.bio)} / 300</span></label><textarea id="profile-bio" name="bio" rows="4" maxlength="600" placeholder="好きな過ごし方や、この街でやってみたいこと">${esc(value.bio)}</textarea><label class="profile-label" for="profile-title">称号</label><select id="profile-title" name="title"><option value="" ${value.title===''?'selected':''}>表示しない</option>${PROFILE_TITLES.map(title=>`<option value="${title}" ${value.title===title?'selected':''}>${title}</option>`).join('')}</select><p class="profile-label">プロフィールアイコン</p><div class="profile-icon-picker" role="group" aria-label="プロフィールアイコン">${PROFILE_ICONS.map(icon=>`<button type="button" data-profile-icon="${icon.id}" class="${value.avatarIcon===icon.id?'selected':''}" aria-label="${icon.label}" aria-pressed="${value.avatarIcon===icon.id}">${profileIconMarkup(icon.id,26)}<span>${icon.label}</span></button>`).join('')}</div><p class="profile-label">アクセントカラー</p><div class="profile-color-picker" role="group" aria-label="アクセントカラー">${ACCENTS.map(color=>`<button type="button" data-profile-color="${color}" style="--swatch:${color}" class="${value.accent===color?'selected':''}" aria-label="${color}を選ぶ" aria-pressed="${value.accent===color}"></button>`).join('')}<label class="profile-custom-color">自由に選ぶ<input type="color" name="accent" value="${safeAccent(value.accent)}" aria-label="自由なアクセントカラー"></label></div><label class="profile-toggle"><span>キャラクターの頭上に名前を表示<small>チャットでは、表示名が引き続き使われます。</small></span><input type="checkbox" name="showName" ${value.showName?'checked':''}></label></fieldset><p class="profile-privacy">${scope==='account'?'表示名・紹介文・称号・アイコンは、ゲーム内のほかのプレイヤーが閲覧できます。ChatGPTの氏名やメールアドレスは自動公開しません。':'ゲストの編集内容は、このブラウザに保存します。ログイン先のプロフィールへ自動でコピーしません。'}</p>${notice?`<div class="profile-error" role="alert">${esc(notice)}</div>`:''}${editContext&&editContext.version!==committed.version?'<div class="profile-conflict"><span>保存先に新しいプロフィールがあります。</span><button type="button" data-profile-action="latest">最新の内容を読み込む</button></div>':''}<div class="profile-actions"><button type="submit" class="profile-btn primary" ${busy?'disabled':''}>${saving?'保存しています…':syncing?'アカウントを確認中…':scope==='account'?'プロフィールを保存':'このブラウザに保存'}</button><button type="button" class="profile-btn quiet" data-profile-action="cancel" ${saving?'disabled':''}>戻る</button></div></form></div>`;
+      shell.innerHTML=`<div class="profile-editor"><div class="profile-edit-preview">${card({...committed,...value},{self:true,preview:true})}</div><form class="profile-form"><fieldset ${busy?'disabled':''}><label class="profile-label" for="profile-name">表示名<span data-count="name">${length(value.name)} / 24</span></label><input id="profile-name" name="name" type="text" value="${esc(value.name)}" maxlength="48" required autocomplete="off" aria-describedby="profile-name-note"><small id="profile-name-note" class="profile-field-note">ゲームの中で使う名前です。1〜24文字で入力できます。</small><label class="profile-label" for="profile-tagline">ひとこと<span data-count="tagline">${length(value.tagline)} / 60</span></label><input id="profile-tagline" name="tagline" type="text" value="${esc(value.tagline)}" maxlength="120" placeholder="例：気になる喫茶店を探しています" autocomplete="off"><label class="profile-label" for="profile-bio">自己紹介<span data-count="bio">${length(value.bio)} / 300</span></label><textarea id="profile-bio" name="bio" rows="4" maxlength="600" placeholder="好きな過ごし方や、この街でやってみたいこと">${esc(value.bio)}</textarea><label class="profile-label" for="profile-title">称号</label><select id="profile-title" name="title"><option value="" ${value.title===''?'selected':''}>表示しない</option>${PROFILE_TITLES.map(title=>`<option value="${title}" ${value.title===title?'selected':''}>${title}</option>`).join('')}</select><p class="profile-label">プロフィールアイコン</p><div class="profile-icon-picker" role="group" aria-label="プロフィールアイコン">${PROFILE_ICONS.map(icon=>`<button type="button" data-profile-icon="${icon.id}" class="${value.avatarIcon===icon.id?'selected':''}" aria-label="${icon.label}" aria-pressed="${value.avatarIcon===icon.id}">${profileIconMarkup(icon.id,26)}<span>${icon.label}</span></button>`).join('')}</div><p class="profile-label">アクセントカラー</p><div class="profile-color-picker" role="group" aria-label="アクセントカラー">${ACCENTS.map(color=>`<button type="button" data-profile-color="${color}" style="--swatch:${color}" class="${value.accent===color?'selected':''}" aria-label="${color}を選ぶ" aria-pressed="${value.accent===color}"></button>`).join('')}<label class="profile-custom-color">自由に選ぶ<input type="color" name="accent" value="${safeAccent(value.accent)}" aria-label="自由なアクセントカラー"></label></div><label class="profile-toggle"><span>キャラクターの頭上に名前を表示<small>チャットでは、表示名が引き続き使われます。</small></span><input type="checkbox" name="showName" ${value.showName?'checked':''}></label></fieldset><p class="profile-privacy">${scope==='device'?'表示名・紹介文・称号・アイコンは、ゲーム内のほかのプレイヤーが閲覧できます。氏名やメールアドレスの入力は不要です。':'通信がつながるまでは、このブラウザだけに保存します。オンラインの保存先には自動でコピーしません。'}</p>${notice?`<div class="profile-error" role="alert">${esc(notice)}</div>`:''}${editContext&&editContext.version!==committed.version?'<div class="profile-conflict"><span>保存先に新しいプロフィールがあります。</span><button type="button" data-profile-action="latest">最新の内容を読み込む</button></div>':''}<div class="profile-actions"><button type="submit" class="profile-btn primary" ${busy?'disabled':''}>${saving?'保存しています…':syncing?'接続を確認中…':scope==='device'?'プロフィールを保存':'このブラウザに保存'}</button><button type="button" class="profile-btn quiet" data-profile-action="cancel" ${saving?'disabled':''}>戻る</button></div></form></div>`;
     }else{
-      shell.innerHTML=`${card(committed,{self:true})}<div class="profile-save-state"><span>${syncing?'保存先を確認しています…':scope==='account'?'アカウントのプロフィール':'このブラウザのゲストプロフィール'}</span>${pendingRecord?'<strong>未保存の編集があります</strong>':''}</div>${notice?`<div class="profile-error" role="alert">${esc(notice)}</div>`:''}<div class="profile-actions"><button class="profile-btn primary" data-profile-action="edit" ${busy?'disabled':''}>${pendingRecord?'編集の続きを開く':'プロフィールを編集'}</button>${committed.code?'<button class="profile-btn" data-profile-action="copy">コードをコピー</button>':''}<button class="profile-btn quiet" data-profile-action="sync" ${busy?'disabled':''}>保存先を再確認</button></div>${scope==='guest'?`<div class="profile-login"><p>ログインすると、自分のアカウントにプロフィールを保存できます。ゲストの内容とログイン後の内容は、それぞれ別に保管します。</p><a class="profile-btn" href="${ONLINE_ORIGIN}/signin-with-chatgpt?return_to=/" target="_top">${hosted?'ChatGPTでログイン':'オンライン版でログイン'}</a></div>`:''}`;
+      shell.innerHTML=`${card(committed,{self:true})}<div class="profile-save-state"><span>${syncing?'保存先を確認しています…':scope==='device'?'このブラウザに紐づくプロフィール':'このブラウザ内のプロフィール'}</span>${pendingRecord?'<strong>未保存の編集があります</strong>':''}</div>${notice?`<div class="profile-error" role="alert">${esc(notice)}</div>`:''}<div class="profile-actions"><button class="profile-btn primary" data-profile-action="edit" ${busy?'disabled':''}>${pendingRecord?'編集の続きを開く':'プロフィールを編集'}</button>${committed.code?'<button class="profile-btn" data-profile-action="copy">コードをコピー</button>':''}<button class="profile-btn quiet" data-profile-action="sync" ${busy?'disabled':''}>通信を再確認</button></div><div class="profile-device-note"><p>プロフィールはこのブラウザに紐づきます。ブラウザのデータを消去すると、別の利用者として開始します。</p>${!hosted?`<a class="profile-btn" href="${onlineOrigin}" target="_top">オンライン版を開く</a>`:''}</div>`;
     }
   }
   function updatePreview(){
@@ -196,7 +198,7 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
     if(action==='cancel'){editing=false;draft=null;editContext=null;error='';render();}
     if(action==='own')open();
     if(action==='sync')await sync();
-    if(action==='latest'){pendingRecord=null;if(scope==='account')cacheAccount();beginEdit(false);error='';render();}
+    if(action==='latest'){pendingRecord=null;if(scope==='device')cacheAccount();beginEdit(false);error='';render();}
     if(action==='copy'){const code=button.dataset.code||committed.code;if(!code)return;try{await navigator.clipboard.writeText(code);toast('フレンドコードをコピーしました。');}catch(_){toast(`フレンドコード: ${code}`);}}
   }
   function mount(){
@@ -213,7 +215,7 @@ export function createProfile({openPanel,toast=()=>{},onChange=()=>{}}={}){
   async function view(userId){
     if(!userId||userId===committed.id){open();return;}
     if(disposed)return;const token=++viewEpoch;viewedId=String(userId);viewedProfile=null;viewLoading=true;editing=false;error='';mount();render();
-    try{await sync();if(token!==viewEpoch||disposed)return;if(scope!=='account')throw new Error('ほかのプレイヤーのプロフィールを見るには、オンライン版でログインしてください。');const result=await api('/profile?userId='+encodeURIComponent(userId));if(token!==viewEpoch||disposed)return;viewedProfile=normalise(result.user);}
+    try{await sync();if(token!==viewEpoch||disposed)return;if(scope!=='device')throw new Error('ほかのプレイヤーのプロフィールに接続できませんでした。通信を確認して再試行してください。');const result=await api('/profile?userId='+encodeURIComponent(userId));if(token!==viewEpoch||disposed)return;viewedProfile=normalise(result.user);}
     catch(failure){if(token===viewEpoch&&!disposed)error=failure.message;}finally{if(token===viewEpoch&&!disposed){viewLoading=false;render();}}
   }
   function close(){visible=false;viewEpoch++;}

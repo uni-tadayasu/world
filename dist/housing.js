@@ -1,5 +1,6 @@
-/** A player-owned home with a real layout editor, bounded furniture, and authenticated saves. */
-const ONLINE_ORIGIN='https://machi-life.hisa-0128-1996.chatgpt.site';
+/** A browser-owned home with a layout editor and anonymous device saves. */
+import {readDeviceSession} from './device-session.js';
+import {isOnlineHost} from './site-config.js';
 const TYPES={
   sofa:{name:'ソファ',w:2.7,d:1.1,color:'#7c9585'},table:{name:'テーブル',w:1.7,d:1,color:'#a17e55'},
   chair:{name:'チェア',w:.65,d:.7,color:'#b69d75'},bed:{name:'ベッド',w:1.65,d:2.3,color:'#d7d5bd'},
@@ -47,10 +48,10 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   const mat=(color,extra={})=>{const m=new THREE.MeshStandardMaterial({color,roughness:.78,...extra});baseMaterials.add(m);return m;};
   const wood=mat('#9a7953'),dark=mat('#3f514a',{metalness:.28,roughness:.52}),ivory=mat('#e8e6d8'),metal=mat('#858f87',{metalness:.65,roughness:.35}),glass=mat('#a6c5bd',{emissive:'#a4c2bb',emissiveIntensity:.22,roughness:.35}),sinkMat=mat('#a8b4ac',{metalness:.7,roughness:.23});
   const floorMat=mat('#b7a58a'),wallMat=mat('#e7e6dc');
-  let layout=defaultLayout(),identity=null,scope='guest',readyForCloud=false,status='この端末に保存',statusError=false,dirty=false,revision=0,saveTimer=null,saving=null,disposed=false,initialized=false;
+  let layout=defaultLayout(),identity=null,scope='guest',readyForCloud=false,status='この端末に保存',statusError=false,dirty=false,revision=0,saveTimer=null,saving=null,syncPromise=null,disposed=false,initialized=false;
   let editor=null,canvas=null,selectedId=null,pendingType='sofa',mode='select',preview=null,confirmClear=false;
   let care={cleanliness:100,water:{},lamps:{}};
-  const getKey=()=>`machi:home:v1:${scope}`;
+  const getKey=()=>scope==='guest'?'machi:home:v1:guest':`machi:home:v2:${scope}`;
   function geometry(key,build){if(!geometryCache.has(key))geometryCache.set(key,build());return geometryCache.get(key);}
   function rounded(w,h,d,r=.05){
     r=Math.min(r,w/5,h/5,d/5);const key=`r:${w},${h},${d},${r}`;
@@ -135,29 +136,36 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   function localEnvelope(){try{return JSON.parse(localStorage.getItem(getKey())||'null');}catch{return null;}}
   function saveLocal(){try{localStorage.setItem(getKey(),JSON.stringify({layout,updatedAt:Date.now(),dirty,care}));return true;}catch{status='端末の保存容量が足りません。変更はこの画面を開いている間だけ保持されます。';statusError=true;return false;}}
   function updateStatus(){if(!editor?.isConnected)return;const el=editor.querySelector('[data-home-status]');if(el){el.textContent=status;el.classList.toggle('error',statusError);}const clean=editor.querySelector('[data-home-cleanliness]');if(clean)clean.textContent=`部屋の整い具合 ${care.cleanliness}%`;}
-  async function api(path,body){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),9000);try{const response=await fetch('/api/social'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json',...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});let value;try{value=await response.json();}catch{throw new Error('オンライン版の応答を確認できません。');}if(!response.ok)throw new Error(value.error||'アカウントへの保存を完了できませんでした。');return value;}finally{clearTimeout(timer);}}
-  async function sync(){
+  async function api(path,body){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),9000);try{const response=await fetch('/api/social'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json',...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});let value;try{value=await response.json();}catch{throw new Error('オンライン版の応答を確認できません。');}if(!response.ok){const error=new Error(value.error||'オンライン保存を完了できませんでした。通信を確認して再試行してください。');error.code=value.code;error.status=response.status;throw error;}return value;}finally{clearTimeout(timer);}}
+  function sync(){
+    if(syncPromise)return syncPromise;
+    const work=syncHome();const pending=work.finally(()=>{if(syncPromise===pending)syncPromise=null;});syncPromise=pending;return pending;
+  }
+  async function syncHome(){
+    if(saving)await saving;
     if(disposed)return;clearTimeout(saveTimer);
-    const hosted=typeof location!=='undefined'&&location.origin===ONLINE_ORIGIN;let me=null,authError='';
-    if(hosted){try{me=await api('/me');}catch(e){authError=e.message;}}
-    const newIdentity=me?.signedIn&&me.user?.id?me.user:null,newScope=newIdentity?`user:${newIdentity.id}`:'guest';
+    const hosted=isOnlineHost();let me=null,authError='';
+    if(hosted){try{me=await readDeviceSession();}catch(e){authError=e.message;}}
+    if(disposed)return;
+    if(authError&&initialized){readyForCloud=false;status='通信を確認できませんでした。表示中の部屋と端末の保存を保持しています。通信を再確認してください。';statusError=true;updateStatus();return {signedIn:Boolean(identity),scope,cloudReady:false,error:true};}
+    const newIdentity=me?.signedIn&&me.user?.id?me.user:null,newScope=newIdentity?`device:${newIdentity.id}`:'guest';
     if(initialized&&scope!==newScope)saveLocal();scope=newScope;identity=newIdentity;readyForCloud=false;
     const local=localEnvelope();layout=sanitize(local?.layout||defaultLayout());dirty=Boolean(local?.dirty);care=local?.care&&typeof local.care==='object'?{cleanliness:Math.max(0,Math.min(100,Number(local.care.cleanliness)||100)),water:local.care.water||{},lamps:local.care.lamps||{}}:{cleanliness:100,water:{},lamps:{}};
     if(identity){
-      try{const remote=await api('/home');readyForCloud=true;if(remote.layout&&!dirty)layout=sanitize(remote.layout);status=dirty?'端末に変更があります。保存するとアカウントに同期します。':remote.layout?'アカウントの部屋を読み込みました。':'新しい自宅です。変更するとアカウントへ保存します。';statusError=false;}
-      catch(e){status='部屋をオンラインから読み込めませんでした。この端末の配置を表示しています。再接続で確認してください。';statusError=true;}
-    }else{status=authError?'接続を確認できないため、ゲストの部屋をこの端末だけで開いています。':'ゲストの自宅 · この端末に保存';statusError=Boolean(authError);}
-    selectedId=null;initialized=true;saveLocal();rebuild();renderEditor();return {signedIn:Boolean(identity),scope,cloudReady:readyForCloud};
+      try{const remote=await api('/home');if(disposed)return;if(remote.userId!==identity.id)throw new Error('このブラウザの保存先が変わりました。通信を再確認してください。');readyForCloud=true;if(remote.layout&&!dirty)layout=sanitize(remote.layout);status=dirty?'端末に変更があります。保存するとオンラインへ同期します。':remote.layout?'このブラウザの部屋を読み込みました。':'新しい自宅です。変更すると、このブラウザ用の保存先へ同期します。';statusError=false;}
+      catch(e){status='部屋を読み込めませんでした。この端末の配置を表示しています。通信を再確認してください。';statusError=true;}
+    }else{status=authError?'接続を確認できないため、この端末に保存した部屋を表示しています。':'このブラウザ内に保存';statusError=Boolean(authError);}
+    if(disposed)return;selectedId=null;initialized=true;saveLocal();rebuild();renderEditor();return {signedIn:Boolean(identity),scope,cloudReady:readyForCloud};
   }
   async function flushSave(){
     if(disposed||saving)return saving;if(!saveLocal()){updateStatus();return {ok:false};}
-    if(!identity){status='ゲストの自宅をこの端末に保存しました。';statusError=false;dirty=false;saveLocal();updateStatus();return {ok:true,local:true};}
-    if(!readyForCloud){status='端末には保存済みです。アカウントへ保存するには「再接続」で確認してください。';statusError=true;updateStatus();return {ok:false,local:true};}
-    const savedRevision=revision,savedScope=scope,savedUserId=identity.id,snapshot=copy(layout);status='アカウントに部屋を保存しています…';statusError=false;updateStatus();
+    if(!identity){status='自宅をこのブラウザに保存しました。';statusError=false;dirty=false;saveLocal();updateStatus();return {ok:true,local:true};}
+    if(!readyForCloud){status='端末には保存済みです。「通信を再確認」でオンライン保存を再試行できます。';statusError=true;updateStatus();return {ok:false,local:true};}
+    const savedRevision=revision,savedScope=scope,savedUserId=identity.id,snapshot=copy(layout);status='部屋を保存しています…';statusError=false;updateStatus();
     saving=(async()=>{try{
-      const me=await api('/me');if(!me.signedIn||me.user?.id!==savedUserId||scope!==savedScope||identity?.id!==savedUserId){readyForCloud=false;throw new Error('ログイン中のアカウントが変わりました。「再接続」で自分の部屋を読み込んでください。');}
-      await api('/home',{layout:snapshot});if(savedScope!==scope)return {ok:false};
-      if(savedRevision===revision)dirty=false;status=dirty?'新しい変更を保存しています…':'自分のアカウントに部屋を保存しました。';statusError=false;saveLocal();return {ok:true};
+      const me=await readDeviceSession();if(!me.signedIn||me.user?.id!==savedUserId||scope!==savedScope||identity?.id!==savedUserId){readyForCloud=false;throw new Error('このブラウザの保存先が変わりました。「通信を再確認」で現在の部屋を読み込んでください。');}
+      await api('/home',{layout:snapshot,expectedUserId:savedUserId});if(savedScope!==scope)return {ok:false};
+      if(savedRevision===revision)dirty=false;status=dirty?'新しい変更を保存しています…':'このブラウザの部屋を保存しました。';statusError=false;saveLocal();return {ok:true};
     }catch(e){status='端末には保存済みです。オンライン保存未完了：'+(e.name==='AbortError'?'応答が時間切れになりました。':e.message);statusError=true;return {ok:false,local:true};}
     finally{saving=null;updateStatus();if(!disposed&&savedScope===scope&&revision!==savedRevision)saveTimer=setTimeout(()=>void flushSave(),1000);}})();return saving;
   }
@@ -165,7 +173,7 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   function ensureStyle(){if(document.querySelector('link[data-machi-housing]'))return;const link=document.createElement('link');link.rel='stylesheet';link.href=new URL('./housing.css',import.meta.url).href;link.dataset.machiHousing='';document.head.append(link);}
   function renderEditor(){
     if(!editor?.isConnected)return;const item=layout.items.find(x=>x.id===selectedId);if(!item)selectedId=null;
-    editor.innerHTML=`<div class="housing-shell"><div class="housing-heading"><p>${identity?'あなたのアカウント専用の部屋です。':'ゲストの部屋は、このブラウザだけに保存されます。'}家具を選んで間取り図に配置します。</p><span class="housing-count">${layout.items.length} / 80</span></div><div class="housing-layout"><div class="housing-plan-wrap"><canvas class="housing-plan" width="600" height="680" tabindex="0" aria-label="自宅の間取り。家具を押して選択し、空いたマスを押すと移動します。"></canvas><p class="housing-hint">${mode==='add'?`${TYPES[pendingType].name}を追加：空いているマスを押してください。`:item?`${TYPES[item.type].name}を選択中：空いているマスを押すと移動します。`:'家具を押して選択。追加する家具は右のカタログから選べます。'}</p><p class="housing-scale">1マス 0.5m · 玄関とキッチン前は通路です</p></div><div class="housing-controls"><div class="housing-tabs"><button type="button" data-h-action="select" class="${mode==='select'?'active':''}">選択・移動</button><button type="button" data-h-action="rotate" ${!item&&mode!=='add'?'disabled':''}>90°回転</button></div><label class="housing-label">置いてある家具<select data-h-select><option value="">家具を選ぶ</option>${layout.items.map(i=>`<option value="${esc(i.id)}" ${i.id===selectedId?'selected':''}>${TYPES[i.type].name} · ${i.x.toFixed(1)}, ${i.z.toFixed(1)}m</option>`).join('')}</select></label><div class="housing-catalog">${Object.entries(TYPES).map(([type,t])=>`<button type="button" data-h-type="${type}" class="${mode==='add'&&pendingType===type?'active':''}"><span style="background:${t.color}"></span>${t.name}</button>`).join('')}</div><label class="housing-label">${item?'選んだ家具の色':'追加する家具の色'}<input type="color" data-h-color value="${item?.color||TYPES[pendingType].color}"></label><div class="housing-swatches">${PALETTE.map(color=>`<button type="button" data-h-swatch="${color}" style="background:${color}" aria-label="家具の色 ${color}"></button>`).join('')}</div><div class="housing-two"><label class="housing-label">床の色<input type="color" data-h-floor value="${layout.floor}"></label><label class="housing-label">壁の色<input type="color" data-h-wall value="${layout.wall}"></label></div><div class="housing-tools"><button type="button" data-h-action="duplicate" ${!item?'disabled':''}>複製</button><button type="button" data-h-action="delete" ${!item?'disabled':''}>選んだ家具を取り除く</button><button type="button" data-h-action="clean">部屋を片づける</button></div><span class="housing-care" data-home-cleanliness>部屋の整い具合 ${care.cleanliness}%</span></div></div><div class="housing-save"><span data-home-status class="${statusError?'error':''}">${esc(status)}</span><button type="button" data-h-action="save">今すぐ保存</button><button type="button" data-h-action="sync">再接続</button></div><details class="housing-details"><summary>部屋を整理する</summary><p>家具を全部片づけても、固定キッチンと部屋は残ります。</p>${confirmClear?'<div class="housing-confirm">家具をすべて片づけますか？<button type="button" data-h-action="confirm-clear">すべて片づける</button><button type="button" data-h-action="cancel-clear">戻る</button></div>':'<button type="button" data-h-action="clear">家具をすべて片づける</button>'}<button type="button" data-h-action="defaults">初期家具を空き場所に追加</button></details><p class="housing-footnote">配置は3D室内へ反映されます。ベッド・ソファ・キッチンは生活に使えます。照明の点灯や植物の手入れは、この端末に記録します。</p></div>`;
+    editor.innerHTML=`<div class="housing-shell"><div class="housing-heading"><p>${identity?'このブラウザに紐づく、あなたの部屋です。':'通信がつながるまでは、このブラウザだけに保存されます。'}家具を選んで間取り図に配置します。</p><span class="housing-count">${layout.items.length} / 80</span></div><div class="housing-layout"><div class="housing-plan-wrap"><canvas class="housing-plan" width="600" height="680" tabindex="0" aria-label="自宅の間取り。家具を押して選択し、空いたマスを押すと移動します。"></canvas><p class="housing-hint">${mode==='add'?`${TYPES[pendingType].name}を追加：空いているマスを押してください。`:item?`${TYPES[item.type].name}を選択中：空いているマスを押すと移動します。`:'家具を押して選択。追加する家具は右のカタログから選べます。'}</p><p class="housing-scale">1マス 0.5m · 玄関とキッチン前は通路です</p></div><div class="housing-controls"><div class="housing-tabs"><button type="button" data-h-action="select" class="${mode==='select'?'active':''}">選択・移動</button><button type="button" data-h-action="rotate" ${!item&&mode!=='add'?'disabled':''}>90°回転</button></div><label class="housing-label">置いてある家具<select data-h-select><option value="">家具を選ぶ</option>${layout.items.map(i=>`<option value="${esc(i.id)}" ${i.id===selectedId?'selected':''}>${TYPES[i.type].name} · ${i.x.toFixed(1)}, ${i.z.toFixed(1)}m</option>`).join('')}</select></label><div class="housing-catalog">${Object.entries(TYPES).map(([type,t])=>`<button type="button" data-h-type="${type}" class="${mode==='add'&&pendingType===type?'active':''}"><span style="background:${t.color}"></span>${t.name}</button>`).join('')}</div><label class="housing-label">${item?'選んだ家具の色':'追加する家具の色'}<input type="color" data-h-color value="${item?.color||TYPES[pendingType].color}"></label><div class="housing-swatches">${PALETTE.map(color=>`<button type="button" data-h-swatch="${color}" style="background:${color}" aria-label="家具の色 ${color}"></button>`).join('')}</div><div class="housing-two"><label class="housing-label">床の色<input type="color" data-h-floor value="${layout.floor}"></label><label class="housing-label">壁の色<input type="color" data-h-wall value="${layout.wall}"></label></div><div class="housing-tools"><button type="button" data-h-action="duplicate" ${!item?'disabled':''}>複製</button><button type="button" data-h-action="delete" ${!item?'disabled':''}>選んだ家具を取り除く</button><button type="button" data-h-action="clean">部屋を片づける</button></div><span class="housing-care" data-home-cleanliness>部屋の整い具合 ${care.cleanliness}%</span></div></div><div class="housing-save"><span data-home-status class="${statusError?'error':''}">${esc(status)}</span><button type="button" data-h-action="save">今すぐ保存</button><button type="button" data-h-action="sync">通信を再確認</button></div><details class="housing-details"><summary>部屋を整理する</summary><p>家具を全部片づけても、固定キッチンと部屋は残ります。</p>${confirmClear?'<div class="housing-confirm">家具をすべて片づけますか？<button type="button" data-h-action="confirm-clear">すべて片づける</button><button type="button" data-h-action="cancel-clear">戻る</button></div>':'<button type="button" data-h-action="clear">家具をすべて片づける</button>'}<button type="button" data-h-action="defaults">初期家具を空き場所に追加</button></details><p class="housing-footnote">配置は3D室内へ反映されます。ベッド・ソファ・キッチンは生活に使えます。照明の点灯や植物の手入れは、この端末に記録します。ブラウザのデータを消去すると、別の利用者として開始します。</p></div>`;
     canvas=editor.querySelector('canvas');drawPlan();bindEditor();
   }
   let pendingRotation=0,pendingColor=null;
@@ -223,6 +231,13 @@ export async function createPlayerHome(THREE,{toast=()=>{},openPanel}={}){
   }
   function dispose(){if(disposed)return;saveLocal();disposed=true;clearTimeout(saveTimer);group.removeFromParent();group.clear();for(const g of geometryCache.values())g.dispose();for(const m of [...baseMaterials,...itemMaterials])m.dispose();editor=null;}
   rebuild();await sync();
-  return {group,colliders,interactables,spawn,bounds,label:'自分の住まい',openEditor,sync,dispose,addFurniture,handleAction,getLayout:()=>copy(layout),update:()=>{}};
+  function sampleGround(x,z,{minHeight=-Infinity,maxHeight=Infinity}={}){
+    if(x<bounds.minX||x>bounds.maxX||z<bounds.minZ||z>bounds.maxZ)return null;
+    let height=0,kind='floor',id='home-floor';
+    for(const item of layout.items){if(item.type!=='rug')continue;const dx=x-item.x,dz=z-item.z,c=Math.cos(item.rotation),n=Math.sin(item.rotation);
+      if(Math.abs(dx*c-dz*n)<=1.6&&Math.abs(dx*n+dz*c)<=1.15&&.0315<=maxHeight){height=.0315;kind='rug';id=item.id;}}
+    return height>=minHeight&&height<=maxHeight?{height,normal:{x:0,y:1,z:0},kind,id}:null;
+  }
+  return {group,colliders,interactables,spawn,bounds,sampleGround,label:'自分の住まい',openEditor,sync,dispose,addFurniture,handleAction,getLayout:()=>copy(layout),update:()=>{}};
 }
 function uniqueId(){return 'f-'+(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10));}

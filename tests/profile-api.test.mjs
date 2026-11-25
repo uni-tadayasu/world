@@ -38,11 +38,14 @@ class Statement{
   async run(){return execute([this])[0];}
 }
 const env={DB:{prepare:sql=>new Statement(sql),batch:async statements=>execute(statements)}};
+const deviceCookies=new Map(),deviceIds=new Map();
 async function api(auth,route,method='GET',data,extraHeaders={}){
-  const headers={...extraHeaders};if(auth)headers['oai-authenticated-user-id']=auth;
-  if(data!==undefined)headers['Content-Type']='application/json';
+  if(auth&&route!=='/me'&&!deviceCookies.has(auth))await api(auth,'/me');
+  const headers={...extraHeaders};if(auth&&deviceCookies.has(auth))headers.Cookie=deviceCookies.get(auth);
+  if(data!==undefined){headers['Content-Type']='application/json';data={expectedUserId:deviceIds.get(auth),...data};}
   const response=await handleSocial(new Request('https://machi.test/api/social'+route,{method,headers,body:data===undefined?undefined:JSON.stringify(data)}),env);
-  return {httpStatus:response.status,...await response.json()};
+  if(auth&&response.headers.has('Set-Cookie'))deviceCookies.set(auth,response.headers.get('Set-Cookie').split(';')[0]);
+  const result=await response.json();if(auth&&route==='/me'&&result.user)deviceIds.set(auth,result.user.id);return {httpStatus:response.status,...result};
 }
 async function ok(auth,route,method='GET',data){const result=await api(auth,route,method,data);assert(result.httpStatus<300,JSON.stringify(result));return result;}
 const privateKeys=['auth_id','authId','email','emailAddress','showName','version','updatedAt'];
@@ -51,12 +54,32 @@ try{
   execute([],fs.readFileSync(new URL('../drizzle/0000_social.sql',import.meta.url),'utf8'));
   execute([{sql:'INSERT INTO profiles(id,auth_id,code,name,created_at,updated_at) VALUES(?,?,?,?,?,?)',params:['legacy','native-legacy','M-LEGACY0001','以前の住人',1000,1000]}]);
   execute([],fs.readFileSync(new URL('../drizzle/0001_profile.sql',import.meta.url),'utf8'));
-  const legacy=(await ok('native-legacy','/me')).user;
-  assert.equal(legacy.name,'以前の住人');assert.equal(legacy.title,'街の住人');assert.equal(legacy.avatarIcon,'leaf');assert.equal(legacy.showName,true);assert.equal(legacy.version,0);
+  execute([],fs.readFileSync(new URL('../drizzle/0002_device_sessions.sql',import.meta.url),'utf8'));
+  const legacy=execute([{sql:'SELECT name,title,avatar_icon,profile_version FROM profiles WHERE id=?',params:['legacy']}])[0].results[0];
+  assert.equal(legacy.name,'以前の住人');assert.equal(legacy.title,'街の住人');assert.equal(legacy.avatar_icon,'leaf');assert.equal(legacy.profile_version,0);
+  const browser=(await api('new-browser','/me','GET',undefined,{'oai-authenticated-user-id':'native-legacy'})).user;
+  assert.notEqual(browser.id,'legacy');assert.equal(browser.name,'旅人','old account data must not be silently imported');
   assert.equal((await api(null,'/profile')).httpStatus,401);
   assert.equal((await api(null,'/profile','POST',{name:'無断変更'})).httpStatus,401);
   const a=(await ok('private-A','/me')).user,b=(await ok('private-B','/me')).user;
   assert.equal(a.name,'旅人');assert(!JSON.stringify(a).includes('private-A'));
+  // A login change between identity lookup and save must not copy personal
+  // objects or a private room into the newly signed-in account.
+  const roomA={version:1,floor:'#112233',wall:'#445566',items:[]};
+  const roomB={version:1,floor:'#778899',wall:'#aabbcc',items:[]};
+  const itemsA=[{id:'plant-A',type:'plant',name:'Aの植物',color:'#64875b',condition:70,stored:false}];
+  const itemsB=[{id:'chair-B',type:'chair',name:'Bの椅子',color:'#9d7b59',condition:90,stored:true}];
+  await ok('private-A','/home','POST',{layout:roomA,expectedUserId:a.id});
+  await ok('private-B','/home','POST',{layout:roomB,expectedUserId:b.id});
+  await ok('private-A','/belongings','POST',{items:itemsA,expectedUserId:a.id});
+  await ok('private-B','/belongings','POST',{items:itemsB,expectedUserId:b.id});
+  assert.equal((await api('private-B','/home','POST',{layout:roomA,expectedUserId:a.id})).code,'home_identity_changed');
+  assert.equal((await api('private-B','/belongings','POST',{items:itemsA,expectedUserId:a.id})).code,'belongings_identity_changed');
+  const returnedRoom=await ok('private-B','/home'),returnedItems=await ok('private-B','/belongings');
+  assert.equal(returnedRoom.userId,b.id);assert.deepEqual(returnedRoom.layout,roomB);
+  assert.equal(returnedItems.userId,b.id);assert.deepEqual(returnedItems.items,itemsB);
+  assert.deepEqual((await ok('private-A','/home')).layout,roomA);
+  assert.deepEqual((await ok('private-A','/belongings')).items,itemsA);
   assert.equal((await api('private-A','/profile','POST',{name:'変更',expectedUserId:b.id})).code,'profile_identity_changed');
   assert.equal((await ok('private-A','/me')).user.version,0);
   const values={name:'ねこ🐈'.repeat(8),tagline:'喫茶店と散歩が好きです',bio:'窓のそばで\r\n本を読んでいます。',title:'本のある暮らし',accent:'#AABBCC',avatarIcon:'book',showName:false};
@@ -90,5 +113,5 @@ try{
   assert.equal((await ok('private-A','/profile')).isSelf,true);
   await ok('private-A','/profile','POST',{name:'一',expectedVersion:current.version});
   assert.equal((await ok('private-A','/me')).user.name,'一','one-character names are supported');
-  console.log('PASS: migration preserves existing profiles; native identity and CSRF enforcement; Unicode lengths; private/public field separation; validation without mutation; optimistic concurrency; updated social summaries; block-aware profile viewing.');
+  console.log('PASS: migration preserves existing profiles; browser cookie identity and CSRF enforcement; room and belongings account-switch guards; Unicode lengths; private/public field separation; validation without mutation; optimistic concurrency; updated social summaries; block-aware profile viewing.');
 }finally{fs.rmSync(directory,{recursive:true,force:true});}

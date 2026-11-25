@@ -3,4 +3,4 @@ Allow: /
 Disallow: /api/
 Disallow: /server/
 
-Sitemap: https://machi-life.hisa-0128-1996.chatgpt.site/sitemap.xml
+Sitemap: https://www.omoji-z.com/sitemap.xml

@@ -59,6 +59,8 @@ jobs:
           set -euo pipefail
           mkdir -p .pages-artifact
           cp -R dist/. .pages-artifact/
+          cp index.html .pages-artifact/index.html
+          if [ -f CNAME ]; then cp CNAME .pages-artifact/CNAME; fi
           rm -rf .pages-artifact/server .pages-artifact/.openai
           touch .pages-artifact/.nojekyll
       - name: Upload Pages artifact

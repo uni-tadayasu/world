@@ -1,10 +1,13 @@
 import {createMaterialLibrary} from './materials.js';
+import {createWalkSurfaceIndex} from './walk-surfaces.js';
 /** Hand-built, human-scale interiors for MACHI LIFE. */
 export function createInterior(THREE, id) {
   const library=createMaterialLibrary(THREE,{quality:'high'});
   const group = new THREE.Group();
   group.name = `interior-${id}`;
   const colliders = [], interactables = [];
+  const bounds={minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5};
+  const walkSurfaces=createWalkSurfaceIndex({bounds}),sampleGround=walkSurfaces.sampleGround;
   const labels = {home:'自宅 · ひかりレジデンス',cafe:'こもれび喫茶',market:'ひかりマート',office:'まちワークス',gallery:'ひかりギャラリー',bookstore:'本棚書店'};
   const label = labels[id] || labels.home;
   const matCache = new Map();
@@ -79,7 +82,7 @@ export function createInterior(THREE, id) {
     const rotatedDepth=Math.abs(Math.sin(rot))*w+Math.abs(Math.cos(rot))*d;
     collider(x,z,rotatedWidth,rotatedDepth);
   }
-  function rug(x,z,w,d,color){const rm=new THREE.MeshStandardMaterial({color:0xffffff,map:texture('rug',color),roughness:1});box(x,.015,z,w,.025,d,rm,false);}
+  function rug(x,z,w,d,color){const rm=new THREE.MeshStandardMaterial({color:0xffffff,map:texture('rug',color),roughness:1});box(x,.015,z,w,.025,d,rm,false);walkSurfaces.addRect({x,z,width:w,depth:d,height:.0275},{kind:'rug'});}
   function action(key,title,subtitle,x,z,radius=2.5){interactables.push({id:key,kind:'action',title,subtitle,position:new THREE.Vector3(x,1.2,z),radius,action:key});}
   function art(x,y,z,w,h,seed=0,rot=0){
     const c=document.createElement('canvas');c.width=512;c.height=Math.round(512*h/w);const ctx=c.getContext('2d');const colors=[['#e2d9bd','#7a9385','#c08265','#273e38'],['#e3e6df','#446d7d','#a1b6b2','#ccaa79'],['#ece2cf','#c6a266','#8a735a','#5e776c']][seed%3];ctx.fillStyle=colors[0];ctx.fillRect(0,0,c.width,c.height);for(let i=0;i<7;i++){ctx.fillStyle=colors[(i+seed)%3+1];ctx.globalAlpha=.55+i*.05;ctx.beginPath();ctx.ellipse(80+(i*137+seed*43)%420,80+(i*91)%Math.max(90,c.height-80),120+(i*19)%100,60+(i*61)%180,(i+seed)*.8,0,Math.PI*2);ctx.fill();}ctx.globalAlpha=1;const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;const frame=box(x,y,z,w+.12,h+.12,.08,wood);frame.rotation.y=rot;const o=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshStandardMaterial({map:t,roughness:.85}));o.position.set(x+Math.sin(rot)*.048,y,z+Math.cos(rot)*.048);o.rotation.y=rot;group.add(o);
@@ -94,6 +97,7 @@ export function createInterior(THREE, id) {
   }
   // Shared shell: a solid room, two generous street-facing windows and entry.
   box(0,-.12,0,16,.24,18,id==='market'||id==='gallery'?tile:floorWood,false);
+  walkSurfaces.addRect({x:0,z:0,width:16,depth:18,height:0},{kind:'floor',id:`floor-${id}`});
   box(0,4.52,0,16,.16,18,m(0xeae7df),false);
   box(0,2.25,-9,16,4.5,.22,wall);box(-8,2.25,0,.22,4.5,18,wall);box(8,2.25,0,.22,4.5,18,wall);
   box(-4.65,2.25,9,6.7,4.5,.22,wall);box(4.65,2.25,9,6.7,4.5,.22,wall);box(0,3.65,9,2.6,1.7,.22,wall);
@@ -239,6 +243,6 @@ export function createInterior(THREE, id) {
   let disposed=false;const lights=[];group.traverse(o=>{if(o.isPointLight){o.userData.baseIntensity=o.intensity;lights.push(o);}});
   function setQuality(tier){library.setQuality(tier);group.traverse(o=>{if(o.isMesh)library.updateGeometry(o);});const limit=tier==='low'?2:tier==='medium'?4:12;lights.forEach((light,index)=>{light.visible=index<limit;});}
   function update(){}
-  function dispose(){if(disposed)return;disposed=true;const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture)textures.add(value);}});for(const g of geometries)g.dispose();for(const m of materials)m.dispose();for(const t of textures)t.dispose();library.dispose();group.removeFromParent();group.clear();}
-  return {group,colliders,interactables,setQuality,update,dispose,spawn:{x:0,z:7,yaw:0},bounds:{minX:-7.5,maxX:7.5,minZ:-8.5,maxZ:8.5},label};
+  function dispose(){if(disposed)return;disposed=true;walkSurfaces.dispose();const geometries=new Set(),materials=new Set(),textures=new Set();group.traverse(o=>{if(o.geometry)geometries.add(o.geometry);for(const mat of Array.isArray(o.material)?o.material:o.material?[o.material]:[]){materials.add(mat);for(const value of Object.values(mat))if(value?.isTexture)textures.add(value);}});for(const g of geometries)g.dispose();for(const m of materials)m.dispose();for(const t of textures)t.dispose();library.dispose();group.removeFromParent();group.clear();}
+  return {group,colliders,interactables,sampleGround,setQuality,update,dispose,spawn:{x:0,z:7,yaw:0},bounds,label};
 }

@@ -9,6 +9,7 @@ const assets={},media={};
 async function syncPagesRoot(){
   const source=await readFile(path.join(dist,'index.html'),'utf8');
   const rootIndex=source
+    .replace(/<script>if\(location\.hostname==='uni-tadayasu\.github\.io'\)\{location\.replace\('[^']*'\+location\.search\+location\.hash\);\}<\/script>/, '<script>location.replace("https://machi-life.hisa-0128-1996.chatgpt.site/"+location.search+location.hash);</script>')
     .replace(/((?:src|href)=["'])\.\/([^"']+\.(?:js|css)(?:[?#][^"']*)?)(["'])/g,'$1./dist/$2$3')
     .replace(/(<script\b[^>]*type=["']importmap["'][^>]*>)([\s\S]*?)(<\/script>)/gi,(_,open,json,close)=>{
       const map=JSON.parse(json);
@@ -18,7 +19,7 @@ async function syncPagesRoot(){
     .replace(/href=["']\.\/["']/g,'href="/world/"');
   await writeFile(path.join(root,'index.html'),rootIndex);
   const about=(await readFile(path.join(dist,'about.html'),'utf8'))
-    .replace(/href=["']\.\/["']/g,'href="/world/"')
+    .replace(/href=["']\.\/["']/g,'href="https://machi-life.hisa-0128-1996.chatgpt.site/"')
     .replace(/href=["']\.\/vendor\//g,'href="./dist/vendor/');
   await writeFile(path.join(root,'about.html'),about);
   for(const name of ['favicon.svg','favicon-32.png','apple-touch-icon.png','icon-192.png','icon-512.png','ogp.png','social-card.svg','manifest.webmanifest','robots.txt','sitemap.xml'])await copyFile(path.join(dist,name),path.join(root,name));
